@@ -502,9 +502,7 @@ both made this look solved, right up until real concurrent requests hit it.
 "Check, then act" is never enough under real concurrency, only a database
 constraint (or real transactional isolation) actually is.
 
-**Third pass.** Went looking again, specifically for things that could get
-this rejected outright or that a sharp reviewer digging into the code would
-catch, including bugs still hiding inside the round-2 fixes above:
+**Third pass.** Went back over it one more time and found six more:
 
 | # | Issue | Severity | Fix |
 |---|---|---|---|
