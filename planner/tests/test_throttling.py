@@ -4,7 +4,7 @@ from rest_framework.throttling import AnonRateThrottle
 
 class AnonThrottleIdentityTests(SimpleTestCase):
     """Regression coverage for a real bypass: DRF's throttle identifies a
-    client by X-Forwarded-For as-is whenever NUM_PROXIES isn't configured --
+    client by X-Forwarded-For as-is whenever NUM_PROXIES isn't configured;
     tested this live against a running server and a client could dodge the
     whole 60/min limit just by sending a different fake header on every
     request. NUM_PROXIES=0 (set in REST_FRAMEWORK settings) makes it ignore

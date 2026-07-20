@@ -21,7 +21,7 @@ class RoutePlanViewSet(
 ):
     """
     POST   /api/v1/route-plans/        compute a new route + fuel plan (or
-                                        return an existing one -- see below)
+                                        return an existing one, see below)
     GET    /api/v1/route-plans/        list recently computed plans
     GET    /api/v1/route-plans/{id}/   retrieve a previously computed plan
     """
@@ -59,7 +59,7 @@ class RoutePlanViewSet(
     def _get_or_persist(plan_key: str, start_query: str, finish_query: str, result) -> tuple[RoutePlan, bool]:
         """Returns (route_plan, created). Two concurrent requests can both
         pass the "does it exist yet" check below at the same time (checked
-        this directly -- 8 concurrent requests produced 2 rows before this
+        this directly, 8 concurrent requests produced 2 rows before this
         was fixed), so the real guarantee isn't this method's ordering, it's
         RoutePlan.plan_key's unique constraint: only one of them wins the
         INSERT, and the loser's IntegrityError gets caught here and turned
@@ -84,7 +84,7 @@ class RoutePlanViewSet(
         ]
 
         # Round each stop's figures *first*, then derive the plan-level
-        # totals as the sum of those already-rounded figures -- guarantees
+        # totals as the sum of those already-rounded figures, guarantees
         # total_cost/total_gallons always exactly equal the sum of the
         # individual fuel_stops the API also returns, rather than being two
         # independently-rounded numbers that can disagree by a cent.
@@ -116,7 +116,7 @@ class RoutePlanViewSet(
         # Defend against a cached RoutePlanResult referencing a Station that
         # has since been deleted (by a reimport, or manually). Without this
         # check, bulk_create below raises a raw IntegrityError (FK
-        # constraint) instead of degrading gracefully -- on_delete=SET_NULL
+        # constraint) instead of degrading gracefully, on_delete=SET_NULL
         # on FuelStop.station doesn't help here, since it only fires when an
         # *existing* referencing row's target is deleted, not when a brand
         # new FuelStop is being created against an id that's already gone.
@@ -169,7 +169,7 @@ class RoutePlanViewSet(
 
 def route_plan_map(request, pk):
     """A minimal, dependency-free (Leaflet + OpenStreetMap tiles, no API key)
-    HTML view of a computed route plan -- useful for visually sanity-checking
+    HTML view of a computed route plan, useful for visually sanity-checking
     a plan in a browser alongside the JSON API."""
     route_plan = get_object_or_404(RoutePlan.objects.prefetch_related("fuel_stops"), pk=pk)
 

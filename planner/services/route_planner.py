@@ -9,18 +9,18 @@ So the common case costs a single external call total; worst case (both ends
 need the Nominatim fallback) is three, still well within "a couple of calls".
 
 The whole result is cached under compute_plan_key(...) for ROUTE_CACHE_TTL_SECONDS,
-so a repeat request for the same trip doesn't hit OSRM/Nominatim again -- unless
+so a repeat request for the same trip doesn't hit OSRM/Nominatim again, unless
 the cache expires or the station data changes (the key folds in the current
 data-version, so re-running import_fuel_prices invalidates old cached plans).
 
-Concurrency: a plain "check cache, then compute" isn't atomic -- two requests
+Concurrency: a plain "check cache, then compute" isn't atomic, two requests
 for the same trip can both miss at the same instant and both call OSRM. cache.add()
 gives us an atomic add-if-absent, used here as a short-lived lock: whoever loses
 the race waits for the winner instead of computing too. It's best-effort, not a
 guarantee (a lock has a token now so a slow/expired holder can't accidentally
 release someone else's lock, and a waiter that times out just computes on its
 own rather than hanging). The actual guarantee against duplicate *persisted*
-plans is the database's unique constraint on RoutePlan.plan_key -- see views.py.
+plans is the database's unique constraint on RoutePlan.plan_key, see views.py.
 """
 
 import hashlib
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 # Two geocoded points closer than this count as "the same place" even if
 # worded differently ("Chicago, IL" vs "Chicago, Illinois"). Wide enough to
 # catch same-city duplicates, narrow enough not to reject genuinely distinct
-# nearby towns -- checked against a few real split-by-a-state-line pairs
+# nearby towns, checked against a few real split-by-a-state-line pairs
 # (Texarkana TX/AR, Kansas City KS/MO), all well over 4 miles apart.
 SAME_LOCATION_THRESHOLD_MILES = 1.0
 
@@ -66,7 +66,7 @@ _COMPUTE_LOCK_MAX_WAIT_SECONDS = 10
 # hiccup, so we only want it to short-circuit the handful of requests that
 # were racing at the same moment, not stick around for an hour. Without
 # this, a losing request just sits through the full lock wait and then
-# fails anyway on its own -- timed this at ~10s slower than it needed to be
+# fails anyway on its own, timed this at ~10s slower than it needed to be
 # for no benefit, since the winner had already failed in a fraction of a
 # second.
 _FAILURE_CACHE_TTL_SECONDS = 10
@@ -90,7 +90,7 @@ def compute_plan_key(
 ) -> str:
     """Stable identity hash for a (start, finish, mpg, range, corridor,
     current data version) combination. Used both as the compute-cache key
-    here and as RoutePlan.plan_key in views.py -- same inputs, same key,
+    here and as RoutePlan.plan_key in views.py, same inputs, same key,
     whether we're deciding what to reuse from cache or what counts as a
     duplicate row in the database.
     """
@@ -105,11 +105,11 @@ def _release_lock(lock_key: str, token: str) -> None:
     # Only release if we still own it. Without this check, a lock that
     # outlived its TTL (a slow computation) could get picked up by a second
     # request, and then the first request's cleanup would delete the
-    # *second* request's lock instead of its own -- reproduced this with a
+    # *second* request's lock instead of its own, reproduced this with a
     # shortened TTL: it let a third request in too, cascading past a lock
     # that was supposed to only ever have one holder at a time. Not
     # perfectly atomic (get-then-delete has its own tiny race), but it's a
-    # best-effort lock to begin with -- this closes the one failure mode
+    # best-effort lock to begin with, this closes the one failure mode
     # that made it actively harmful rather than just occasionally useless.
     if cache.get(lock_key) == token:
         cache.delete(lock_key)
@@ -150,7 +150,7 @@ def compute_route_plan(
                 if isinstance(cached, PlannerError):
                     raise cached
                 return cached
-        # Gave up waiting for the in-flight computation -- proceed
+        # Gave up waiting for the in-flight computation, proceed
         # independently rather than hang or fail.
 
     try:

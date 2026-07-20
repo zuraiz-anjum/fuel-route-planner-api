@@ -1,5 +1,5 @@
 """Lightweight sanity checks on the actual bundled data files (not the full
-import pipeline -- that's covered, with synthetic fixtures, in
+import pipeline, that's covered, with synthetic fixtures, in
 test_import.py). Guards against someone accidentally committing a
 truncated/corrupt data file."""
 

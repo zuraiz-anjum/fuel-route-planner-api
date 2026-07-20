@@ -32,7 +32,7 @@ class FindStationsNearRouteTests(TestCase):
             opis_id=3, name="Earlier", city="X", state="IL",
             price_per_gallon="3.00", latitude=40.0, longitude=-89.9,
         )
-        # No coordinates at all -- must never show up as a candidate.
+        # No coordinates at all, must never show up as a candidate.
         Station.objects.create(
             opis_id=4, name="Ungeocoded", city="Z", state="IL", price_per_gallon="3.00",
         )
@@ -67,7 +67,7 @@ class FindStationsNearRouteTests(TestCase):
         # A station sitting at a spot the route revisits far apart in
         # mileage (a spur, a cloverleaf, two legs running close together)
         # used to only ever show up at whichever encounter happened to be
-        # the single closest match -- the other one was silently dropped, so
+        # the single closest match, the other one was silently dropped, so
         # a station only reachable on the second pass looked unavailable.
         same_lat, same_lng = 40.0, -87.0
         route_path = RoutePath(

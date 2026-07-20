@@ -1,5 +1,5 @@
 """Single-call integration with OSRM's free, public routing API
-(router.project-osrm.org -- no API key required).
+(router.project-osrm.org, no API key required).
 
 We ask OSRM for full route geometry in the same request that gets us
 distance/duration (`overview=full&geometries=geojson`), so computing an
@@ -23,7 +23,7 @@ METERS_PER_MILE = 1609.344
 # The only two OSRM response codes that actually mean "no road connects
 # these two points" (e.g. Hawaii to the mainland). Everything else non-Ok
 # (TooBig, InvalidQuery, InvalidValue, ...) is a request/service problem,
-# not a geographic fact -- lumping those in under "no route exists" was
+# not a geographic fact, lumping those in under "no route exists" was
 # itself a bug: it hid a real integration issue behind a message that
 # sounds like a permanent, nothing-to-be-done answer.
 _NO_ROUTE_CODES = {"NoRoute", "NoSegment"}
@@ -62,7 +62,7 @@ def get_route(origin: Coordinates, destination: Coordinates) -> RouteResult:
 
     # OSRM's public server responds with a non-2xx status (observed: 400)
     # even for a well-formed "no route exists between these points" answer
-    # (e.g. Hawaii to the mainland -- no road connects them), not just for
+    # (e.g. Hawaii to the mainland, no road connects them), not just for
     # genuine service failures. Try to read the structured error out of the
     # body first, in either case, so that permanent "no route" answers get
     # an accurate message instead of being lumped in with transient

@@ -46,7 +46,7 @@ SECRET_KEY = os.environ.get(
 # (generic 500s / rejected Host headers) rather than *open* (leaked stack
 # traces, settings, and SQL to the public internet; a wildcard Host header
 # accepted from anyone). Local dev opts IN to the friendlier DEBUG=True
-# experience via .env.example -- see that file.
+# experience via .env.example, see that file.
 DEBUG = env_bool("DJANGO_DEBUG", False)
 
 _default_allowed_hosts = "localhost,127.0.0.1,[::1]"
@@ -87,11 +87,11 @@ MIDDLEWARE = [
 # --------------------------------------------------------------------------
 # CORS
 #
-# Off (no origins allowed) by default -- explicitly opt in per-deployment via
+# Off (no origins allowed) by default, explicitly opt in per-deployment via
 # CORS_ALLOWED_ORIGINS, e.g. "https://myfrontend.example.com,https://app.example.com".
 # CORS_ALLOW_ALL_ORIGINS is available for quick local/demo use (e.g. testing
 # from a local frontend dev server) but is never enabled by an env var alone
-# reaching some default -- it requires the explicit CORS_ALLOW_ALL_ORIGINS=true.
+# reaching some default, it requires the explicit CORS_ALLOW_ALL_ORIGINS=true.
 # --------------------------------------------------------------------------
 
 CORS_ALLOWED_ORIGINS = [
@@ -123,7 +123,7 @@ WSGI_APPLICATION = "config.wsgi.application"
 #
 # Defaults to a local SQLite file so the project runs with zero external
 # services. Set DATABASE_URL (e.g. from docker-compose) to switch to
-# Postgres without touching code -- this is the DB the team uses in
+# Postgres without touching code, this is the DB the team uses in
 # production, per the job spec.
 # --------------------------------------------------------------------------
 
@@ -207,7 +207,7 @@ REST_FRAMEWORK = {
     },
     # DRF trusts X-Forwarded-For as-is when NUM_PROXIES isn't set, which means
     # a client can just send a different fake value on every request and
-    # never be throttled -- tested this against the demo server and it works
+    # never be throttled, tested this against the demo server and it works
     # (60/min becomes no limit at all). NUM_PROXIES=0 makes it ignore that
     # header entirely and throttle by REMOTE_ADDR, which is what you want
     # with no reverse proxy in front (local/docker-compose). Behind a real

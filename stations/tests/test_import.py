@@ -127,8 +127,8 @@ class ImportFuelPricesTests(TestCase):
         # reference stays ungeocoded after import (see
         # test_unresolved_city_left_ungeocoded above) until
         # geocode_remaining_stations fills it in via Nominatim. Re-running
-        # this command afterwards -- a completely normal thing to do, e.g.
-        # to pick up a price update -- rebuilt every Station row from
+        # this command afterwards, a completely normal thing to do, e.g.
+        # to pick up a price update, rebuilt every Station row from
         # scratch and overwrote latitude/longitude/geocode_source with the
         # (still-empty) city-reference lookup, silently erasing that
         # enrichment every time.

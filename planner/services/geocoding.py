@@ -3,7 +3,7 @@
 
 Resolution order, cheapest/fastest first:
   1. Django cache (any query we've already resolved, local or remote).
-  2. Local lookup against the bundled US cities reference -- instant, free,
+  2. Local lookup against the bundled US cities reference, instant, free,
      no rate limits. Covers the overwhelming majority of "City, ST" style
      input, which is what a route-planning API realistically receives.
   3. Nominatim (OpenStreetMap), as a fallback for specific street addresses
@@ -78,8 +78,8 @@ _warned_about_placeholder_user_agent = False
 
 def _warn_once_if_user_agent_is_still_the_placeholder() -> None:
     # Nominatim's usage policy requires an identifying User-Agent and can
-    # (and does) block generic/placeholder ones. Warn loudly -- once per
-    # process, not once per request -- rather than let this fail silently
+    # (and does) block generic/placeholder ones. Warn loudly, once per
+    # process, not once per request, rather than let this fail silently
     # and mysteriously in production the day someone forgets to set it.
     global _warned_about_placeholder_user_agent
     if _warned_about_placeholder_user_agent:
@@ -87,7 +87,7 @@ def _warn_once_if_user_agent_is_still_the_placeholder() -> None:
     if "set NOMINATIM_USER_AGENT" in settings.NOMINATIM_USER_AGENT:
         logger.warning(
             "NOMINATIM_USER_AGENT is still the default placeholder (%r). Nominatim's usage "
-            "policy requires a real identifying contact and may block generic user agents -- "
+            "policy requires a real identifying contact and may block generic user agents; "
             "set NOMINATIM_USER_AGENT before relying on this in production.",
             settings.NOMINATIM_USER_AGENT,
         )
@@ -146,7 +146,7 @@ def geocode_location(query: str) -> Coordinates:
         except (KeyError, TypeError):
             # A malformed/unexpected cache payload (e.g. a schema change
             # deployed while an old entry from the 30-day TTL is still
-            # alive) must never crash the request -- treat it exactly like
+            # alive) must never crash the request, treat it exactly like
             # a cache miss and recompute, silently self-healing the entry
             # on the way out (see the cache.set call below).
             logger.warning("Ignoring malformed geocode cache entry for key=%r", key)

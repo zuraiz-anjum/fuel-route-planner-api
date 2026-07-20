@@ -1,6 +1,6 @@
 """Domain-level exceptions for the route planner, plus a DRF exception
 handler that turns them into clean, consistent 4xx JSON responses instead of
-500s -- callers get a stable error contract regardless of which stage failed.
+500s, callers get a stable error contract regardless of which stage failed.
 """
 
 from rest_framework import status
@@ -41,7 +41,7 @@ class SameLocationError(PlannerError):
 
     A plain string comparison ("Chicago, IL" == "Chicago, Illinois"?) misses
     this the moment the two queries are worded differently but name the same
-    place -- this check runs *after* geocoding, on actual coordinates, so it
+    place, this check runs *after* geocoding, on actual coordinates, so it
     catches the semantic duplicate, not just the literal one."""
 
     default_message = "Start and finish resolve to the same location."

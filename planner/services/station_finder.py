@@ -82,8 +82,8 @@ def find_stations_near_route(route_path: RoutePath, corridor_miles: float | None
 
         # Usually a station is near just one stretch of the route, and this
         # loop does one pass. But if the route genuinely comes near the same
-        # station twice -- a spur, a cloverleaf, two legs running close
-        # together -- picking only the single closest point (the old
+        # station twice, a spur, a cloverleaf, two legs running close
+        # together, picking only the single closest point (the old
         # np.argmin-only approach) silently drops the other encounter. If the
         # vehicle only needs fuel on the *second* pass, that station looked
         # unavailable even though it physically wasn't. So: split the

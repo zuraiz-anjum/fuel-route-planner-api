@@ -1,5 +1,5 @@
 """End-to-end API tests. External services (geocoding, routing) are mocked
-so the whole suite runs offline and deterministically -- exact algorithm
+so the whole suite runs offline and deterministically, exact algorithm
 correctness is covered in detail by test_fuel_optimizer.py; these tests
 cover request/response wiring, persistence, and HTTP-level error handling.
 """
@@ -128,7 +128,7 @@ class RoutePlanApiTests(APITestCase):
     def test_identical_repeat_request_reuses_the_same_persisted_plan(self):
         # This test used to assert RoutePlan.objects.count() == 2 here and
         # treat that as *correct*
-        # behavior -- every cache hit was still writing a brand new
+        # behavior, every cache hit was still writing a brand new
         # RoutePlan + full set of FuelStops, meaning the table grew without
         # bound purely from repeat/duplicate requests, cache or no cache.
         # The fix: a cache hit reuses the already-persisted plan (200), and
@@ -166,7 +166,7 @@ class RoutePlanApiTests(APITestCase):
         # total_cost/total_gallons used to be rounded independently from
         # each fuel_stop's cost/gallons_purchased
         # (both derived from the same unrounded float sum, rounded
-        # separately) -- mathematically guaranteed to disagree by a cent
+        # separately), mathematically guaranteed to disagree by a cent
         # for *some* inputs (round(30.015, 2) == 30.02, but
         # round(10.005,2)*3 == 30.03). Now the total is computed as the sum
         # of the already-rounded per-stop values, so they can never diverge.
@@ -204,7 +204,7 @@ class RoutePlanApiTests(APITestCase):
         # the cached result is later replayed into _persist (e.g. a
         # reimport, or an admin deleting a bad row, landing inside the
         # cache TTL window), creating the FuelStop used to raise a raw
-        # IntegrityError (FOREIGN KEY constraint failed) -- on_delete=SET_NULL
+        # IntegrityError (FOREIGN KEY constraint failed), on_delete=SET_NULL
         # on FuelStop.station doesn't help here, because it only fires when
         # an *already-referencing* row's target is deleted, not when a new
         # FuelStop is being created against an id that's already gone.
@@ -232,8 +232,8 @@ class RoutePlanApiTests(APITestCase):
     def test_explicit_null_mpg_is_treated_the_same_as_omitting_it(self):
         # Omitting "mpg" entirely worked fine (used the default), but a
         # client that always sends every key and
-        # uses JSON null for "unset" -- an extremely common pattern with
-        # typed form libraries / generated API clients -- got a confusing
+        # uses JSON null for "unset", an extremely common pattern with
+        # typed form libraries / generated API clients, got a confusing
         # 400 "This field may not be null" for the identical intent.
         response = self._create_plan(distance_miles=100.0, extra_payload={"mpg": None})
         self.assertEqual(response.status_code, 201, response.data)
@@ -268,7 +268,7 @@ class ConcurrentIdenticalRequestsTests(APITransactionTestCase):
     """Regression test for a real race condition: N clients requesting the
     identical trip at the same moment used to each pass the "does this
     already exist?" check before any of them had written a row, so every
-    one of them called OSRM and every one of them inserted a RoutePlan --
+    one of them called OSRM and every one of them inserted a RoutePlan:
     duplicate rows and wasted upstream calls. A plain APITestCase can't
     catch this: it wraps each test in a single DB transaction, so other
     threads' Django ORM calls don't see uncommitted work the way they

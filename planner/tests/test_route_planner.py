@@ -30,7 +30,7 @@ def _patched_pipeline():
     route_patch = patch(
         "planner.services.routing.get_route",
         # distance_miles is what fuel_optimizer treats as the trip length,
-        # independent of the raw geometry's length -- kept under the
+        # independent of the raw geometry's length, kept under the
         # default 500mi vehicle range so these caching-focused tests don't
         # need any Station rows in the DB to be feasible.
         return_value=RouteResult(distance_miles=400.0, duration_seconds=3600.0, geometry=STRAIGHT_LINE_GEOMETRY),
@@ -66,7 +66,7 @@ class ComputeRoutePlanCachingTests(TestCase):
             # Simulates a reimport completing: import_fuel_prices creates
             # the log row AND proactively clears the cached data-version
             # (data_version.py caches that lookup for a few seconds so a
-            # plain cache *hit* doesn't cost a DB query on every request --
+            # plain cache *hit* doesn't cost a DB query on every request,
             # see its docstring). A test that only does the first half
             # would still see the stale cached version for a few seconds,
             # which is exactly why the real command does both.
@@ -90,7 +90,7 @@ class SameLocationValidationTests(TestCase):
 
     def test_rejects_start_and_finish_that_geocode_to_the_same_point_even_if_worded_differently(self):
         # The API-level "start != finish" check was a naive string
-        # comparison and completely missed this --
+        # comparison and completely missed this:
         # "Chicago, IL" and "Chicago, Illinois" sailed straight through as a
         # "valid" 201-with-$0-cost trip. This checks resolved *coordinates*.
         same_point = Coordinates(latitude=41.8373, longitude=-87.6861)
@@ -119,7 +119,7 @@ class SameLocationValidationTests(TestCase):
 
 
 class FailedComputationCachingTests(TestCase):
-    """A failure now gets cached too, briefly -- see route_planner.py's
+    """A failure now gets cached too, briefly, see route_planner.py's
     _FAILURE_CACHE_TTL_SECONDS. Before this, only successes were cached, so
     a concurrent request that lost the compute-lock race and then found the
     winner had failed would just repeat the whole (also-failing) pipeline
@@ -145,7 +145,7 @@ class FailedComputationCachingTests(TestCase):
 
 
 class ComputeLockConcurrencyTests(APITransactionTestCase):
-    """Real-thread tests for the compute lock itself (not the HTTP layer --
+    """Real-thread tests for the compute lock itself (not the HTTP layer,
     see test_api.py's ConcurrentIdenticalRequestsTests for that). Needs
     APITransactionTestCase, same reason as that class: real threads need to
     see each other's committed cache/DB state, which TestCase's per-test
@@ -197,7 +197,7 @@ class ComputeLockConcurrencyTests(APITransactionTestCase):
         # no ownership check). If a
         # computation outlived the lock's TTL, a second request could
         # legitimately acquire the (expired) lock and start its own
-        # computation -- but then the FIRST request's cleanup would delete
+        # computation, but then the FIRST request's cleanup would delete
         # the SECOND request's still-in-use lock, letting a THIRD request
         # steal it too, and so on with no bound. The fix (a per-acquisition
         # token, checked before deleting) can't stop the TTL from expiring
@@ -228,7 +228,7 @@ class ComputeLockConcurrencyTests(APITransactionTestCase):
             with geocode_patch, route_patch:
                 threads = [
                     threading.Thread(target=call, args=(0.0,)),   # holds the lock past its 1s TTL
-                    threading.Thread(target=call, args=(1.2,)),   # TTL already expired -- legitimately steals it
+                    threading.Thread(target=call, args=(1.2,)),   # TTL already expired, legitimately steals it
                     threading.Thread(target=call, args=(1.9,)),   # arrives after thread 1 cleans up
                 ]
                 for t in threads:

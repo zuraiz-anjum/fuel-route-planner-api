@@ -1,7 +1,7 @@
 # USPS state/territory codes considered "in scope" for a USA-only route
 # planner. The source price sheet also contains Canadian province codes
 # (AB, BC, MB, NB, NS, ON, QC, SK, YT) which are intentionally excluded at
-# import time -- see stations/management/commands/import_fuel_prices.py.
+# import time, see stations/management/commands/import_fuel_prices.py.
 US_STATE_CODES = {
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
     "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",

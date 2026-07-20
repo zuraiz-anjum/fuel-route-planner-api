@@ -7,16 +7,16 @@ from stations.models import Station
 
 class RoutePlan(models.Model):
     """A computed route + fuel-stop plan, persisted so it can be fetched
-    again (GET by id) or rendered on the map view without recomputing --
+    again (GET by id) or rendered on the map view without recomputing,
     and so the API has a request history for free."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     # Hash of (normalized start, normalized finish, mpg, range, corridor,
-    # station-data-version) -- see compute_plan_key() in route_planner.py.
+    # station-data-version), see compute_plan_key() in route_planner.py.
     # This is what actually stops two concurrent identical requests from
     # both landing a row: a cache-based "check, then create" isn't atomic
-    # (confirmed it directly -- 8 concurrent requests produced 2 rows), but
+    # (confirmed it directly, 8 concurrent requests produced 2 rows), but
     # a DB unique constraint is, no matter how many processes are involved.
     plan_key = models.CharField(max_length=64, unique=True, db_index=True)
 

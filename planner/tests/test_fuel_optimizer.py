@@ -25,7 +25,7 @@ class PlanFuelStopsTests(SimpleTestCase):
         # Single station at mile 50 of a 100 mile trip; nothing cheaper
         # ahead, trip ends within range, so it should buy exactly enough to
         # finish (50 for the unbilled leg already driven + 50 to the
-        # destination) -- 10 gallons total at 10mpg, matching total_miles/mpg.
+        # destination), 10 gallons total at 10mpg, matching total_miles/mpg.
         stations = [_route_station(1, "3.00", 50)]
         plan = plan_fuel_stops(stations, total_miles=100, mpg=10, tank_capacity_miles=500)
 
@@ -50,7 +50,7 @@ class PlanFuelStopsTests(SimpleTestCase):
     def test_fills_to_capacity_when_nothing_cheaper_is_reachable(self):
         # A (100, $3.00) -> B (250, $3.50) -> C (500, $4.00); nothing ever
         # gets cheaper, tank=300, trip=700. Each stop should fill up to
-        # exactly tank capacity (never more -- this exercises the fix for an
+        # exactly tank capacity (never more, this exercises the fix for an
         # overfill bug found while deriving this very test), and the final
         # stop buys only what's left to finish.
         stations = [
@@ -75,7 +75,7 @@ class PlanFuelStopsTests(SimpleTestCase):
         # for the distance already driven from the empty-tank start (billed
         # here since there's no earlier station to have bought it from), so
         # its gallons_purchased legitimately includes that on top of a full
-        # forward fill -- see the module docstring. Strip that known
+        # forward fill, see the module docstring. Strip that known
         # retroactive amount back out before checking the capacity bound.
         stations = [
             _route_station(1, "3.00", 100),
@@ -128,9 +128,9 @@ class PlanFuelStopsTests(SimpleTestCase):
         # distance_along_route_miles (entirely plausible given route
         # sampling resolution) used to have the empty-tank "retroactive"
         # first-leg billing assigned to whichever one happened to come
-        # first in the input list -- arbitrary, and NOT necessarily the
+        # first in the input list, arbitrary, and NOT necessarily the
         # cheaper one. Reproduced concretely: same trip, same two stations,
-        # only list order flipped, produced $35.00 vs $20.00 -- a 75%
+        # only list order flipped, produced $35.00 vs $20.00, a 75%
         # difference for an identical input. The fix sorts by
         # (position, price), so the cheaper of any tied stations always
         # wins the tie, regardless of input/DB row order.

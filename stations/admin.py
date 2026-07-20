@@ -13,8 +13,8 @@ class StationAdmin(admin.ModelAdmin):
 
 @admin.register(DataImportLog)
 class DataImportLogAdmin(admin.ModelAdmin):
-    """Read-only visibility into import history -- when a reimport last
-    happened, and how many stations it covered -- without needing shell
+    """Read-only visibility into import history, when a reimport last
+    happened, and how many stations it covered, without needing shell
     access. This is the table that drives route-plan cache invalidation
     (see stations/data_version.py), so being able to see it matters."""
 

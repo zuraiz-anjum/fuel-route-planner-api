@@ -15,7 +15,7 @@ class RoutePlanRequestSerializer(serializers.Serializer):
     # allow_null=True alongside default=None: a client that always sends
     # every key (common with typed form libraries / generated clients) and
     # uses JSON null for "unset" should get the same "use the default"
-    # behavior as a client that omits the key entirely -- previously,
+    # behavior as a client that omits the key entirely, previously,
     # omitting the field worked but explicitly sending `"mpg": null` was
     # rejected with "This field may not be null", for identical intent.
     mpg = serializers.FloatField(

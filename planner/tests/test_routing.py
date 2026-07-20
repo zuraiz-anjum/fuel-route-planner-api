@@ -32,8 +32,8 @@ class GetRouteErrorMessageTests(SimpleTestCase):
 
     def test_other_error_codes_do_not_get_the_no_route_message(self):
         # Any non-"Ok" OSRM code used to be reported as "no driving route
-        # exists between these locations" --
-        # true for NoRoute/NoSegment, but not for a request/service problem
+        # exists between these locations", true for NoRoute/NoSegment, but
+        # not for a request/service problem
         # like TooBig (route too complex for the server to handle). Lumping
         # them together hides real integration issues behind a message that
         # sounds like a permanent, nothing-to-be-done geographic fact.
