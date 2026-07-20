@@ -1,0 +1,13 @@
+# Core
+Django==5.2.16                 # current LTS (supported through April 2028) -- preferred over the
+                                # brand-new 6.0 for a "production-ready" backend service
+djangorestframework==3.17.1
+numpy==2.5.1                   # vectorized geo-distance math (planner/services/geo_math.py)
+requests==2.34.2               # OSRM + Nominatim HTTP calls
+python-dotenv==1.2.2           # load .env in local/dev
+dj-database-url==3.1.2         # DATABASE_URL -> Django DATABASES, so Postgres is a one-line env change
+
+# Production
+gunicorn==26.0.0                # WSGI server (see Dockerfile)
+psycopg[binary]==3.3.4          # Postgres driver (only used when DATABASE_URL points at Postgres)
+redis==8.0.1                    # backs Django's built-in RedisCache (only used when REDIS_URL is set)
