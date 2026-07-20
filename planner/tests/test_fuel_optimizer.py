@@ -124,7 +124,7 @@ class PlanFuelStopsTests(SimpleTestCase):
         self.assertEqual(used_ids, {2})
 
     def test_tied_position_stations_do_not_change_cost_based_on_input_order(self):
-        # Regression test for a real bug: two stations tied on
+        # Found this during dev: two stations tied on
         # distance_along_route_miles (entirely plausible given route
         # sampling resolution) used to have the empty-tank "retroactive"
         # first-leg billing assigned to whichever one happened to come

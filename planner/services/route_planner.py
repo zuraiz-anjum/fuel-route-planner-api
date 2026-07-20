@@ -1,67 +1,75 @@
 """Top-level orchestration: turns (start, finish) free-text locations into a
 full route + fuel-stop plan.
 
-This is the only place that matters for the assignment's "don't hammer the
-free routing API" requirement:
+Call budget for a normal request between two US cities:
+  - geocode_location(start)  -> 0 network calls (known city, the common case)
+  - geocode_location(finish) -> same
+  - get_route(...)           -> always exactly 1 OSRM call
+So the common case costs a single external call total; worst case (both ends
+need the Nominatim fallback) is three, still well within "a couple of calls".
 
-  - geocode_location(start)   -> 0 network calls if it's a known US city
-                                  (the common case), 1 Nominatim call otherwise
-  - geocode_location(finish)  -> same
-  - get_route(...)            -> always exactly 1 OSRM call
+The whole result is cached under compute_plan_key(...) for ROUTE_CACHE_TTL_SECONDS,
+so a repeat request for the same trip doesn't hit OSRM/Nominatim again -- unless
+the cache expires or the station data changes (the key folds in the current
+data-version, so re-running import_fuel_prices invalidates old cached plans).
 
-So a request between two ordinary US cities costs a **single** external
-call total; the worst case (both endpoints needing the geocoding fallback)
-is three -- matching "one ideal, two or three acceptable" for the whole
-pipeline, not just the routing leg.
-
-The whole result is cached by `compute_plan_key(...)` for a configurable TTL
-(ROUTE_CACHE_TTL_SECONDS), so repeated requests for the same trip don't call
-OSRM (or Nominatim) again -- until the cache expires *or the station data
-changes* (the key folds in the current station-data version, so re-running
-`import_fuel_prices` invalidates every previously cached plan automatically).
-
---- Concurrency -------------------------------------------------------------
-A plain "check the cache, then compute" is not atomic: two truly concurrent
-identical requests can both miss the cache and both call OSRM -- reproduced
-directly (6 concurrent identical requests -> 6 real OSRM calls, not 1).
-`cache.add()` (atomic add-if-absent on every backend Django ships) is used
-as a short-lived best-effort lock around the compute step: a request that
-loses the race waits briefly for the winner to finish and reuses its
-result. This *reduces* duplicate calls under concurrency; it is not a hard
-guarantee (if the wait times out -- e.g. OSRM itself is unusually slow --
-the waiter computes independently rather than hang indefinitely). The hard
-guarantee that concurrent identical requests never produce more than one
-*persisted* RoutePlan lives in the database (RoutePlan.plan_key's unique
-constraint, enforced in planner/views.py), not here -- that's the part that
-actually can't be allowed to fail.
-------------------------------------------------------------------------------
+Concurrency: a plain "check cache, then compute" isn't atomic -- two requests
+for the same trip can both miss at the same instant and both call OSRM. cache.add()
+gives us an atomic add-if-absent, used here as a short-lived lock: whoever loses
+the race waits for the winner instead of computing too. It's best-effort, not a
+guarantee (a lock has a token now so a slow/expired holder can't accidentally
+release someone else's lock, and a waiter that times out just computes on its
+own rather than hanging). The actual guarantee against duplicate *persisted*
+plans is the database's unique constraint on RoutePlan.plan_key -- see views.py.
 """
 
 import hashlib
+import logging
 import time
+import uuid
 from dataclasses import dataclass
 
 from django.conf import settings
 from django.core.cache import cache
 
-from planner.exceptions import SameLocationError
+from planner.exceptions import PlannerError, SameLocationError
 from planner.services import fuel_optimizer, geocoding, geometry, routing, station_finder
 from planner.services.geo_math import haversine_miles
 from planner.services.query_normalization import normalize_query
 from stations.data_version import get_current_data_version
 
-# Two geocoded points closer than this are treated as "the same place" even
-# if they were worded differently ("Chicago, IL" vs "Chicago, Illinois").
-# Wide enough to catch same-city duplicates (which resolve to identical or
-# near-identical city centroids), narrow enough to never reject two
-# genuinely distinct, if nearby, towns as an invalid trip -- verified against
-# several real split-by-a-state-line "twin cities" (Texarkana TX/AR, Kansas
-# City KS/MO, Bristol VA/TN), all >4mi apart center-to-center.
+logger = logging.getLogger(__name__)
+
+# Two geocoded points closer than this count as "the same place" even if
+# worded differently ("Chicago, IL" vs "Chicago, Illinois"). Wide enough to
+# catch same-city duplicates, narrow enough not to reject genuinely distinct
+# nearby towns -- checked against a few real split-by-a-state-line pairs
+# (Texarkana TX/AR, Kansas City KS/MO), all well over 4 miles apart.
 SAME_LOCATION_THRESHOLD_MILES = 1.0
 
-_COMPUTE_LOCK_TTL_SECONDS = 30
+# Needs to comfortably outlast the slowest realistic computation, or the
+# lock expires while its own holder is still working and a second request
+# starts a redundant computation alongside it. The old flat 30s was too
+# close for comfort: two Nominatim calls at their own timeout plus one slow
+# OSRM call already adds up to ~28s before any of our own processing time,
+# so a single retry-worthy slow request could trip this. Deriving it from
+# the actual configured timeouts keeps it correctly sized if those change.
+_COMPUTE_LOCK_TTL_SECONDS = int(
+    settings.NOMINATIM_TIMEOUT_SECONDS * 2 + settings.OSRM_TIMEOUT_SECONDS + 15
+)
 _COMPUTE_LOCK_POLL_INTERVAL_SECONDS = 0.2
 _COMPUTE_LOCK_MAX_WAIT_SECONDS = 10
+
+# How long a *failed* computation (bad input, no route, etc.) stays cached.
+# Deliberately much shorter than ROUTE_CACHE_TTL_SECONDS: a successful plan
+# is worth caching for a while, but an error might be a transient upstream
+# hiccup, so we only want it to short-circuit the handful of requests that
+# were racing at the same moment, not stick around for an hour. Without
+# this, a losing request just sits through the full lock wait and then
+# fails anyway on its own -- timed this at ~10s slower than it needed to be
+# for no benefit, since the winner had already failed in a fraction of a
+# second.
+_FAILURE_CACHE_TTL_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -80,21 +88,31 @@ class RoutePlanResult:
 def compute_plan_key(
     start_query: str, finish_query: str, mpg: float, tank_capacity_miles: float, corridor_miles: float
 ) -> str:
-    """The stable identity hash for a (normalized start, normalized finish,
-    mpg, range, corridor, current station-data-version) combination.
-
-    Used as both the whole-plan computation cache key (here) and
-    RoutePlan.plan_key, the database's unique-constraint dedup mechanism
-    (planner/views.py) -- the same inputs that should share a cached
-    computation are exactly the inputs that should share one persisted row.
-    Public (not `_`-prefixed) so the view layer can compute the identical
-    key for its own uniqueness check.
+    """Stable identity hash for a (start, finish, mpg, range, corridor,
+    current data version) combination. Used both as the compute-cache key
+    here and as RoutePlan.plan_key in views.py -- same inputs, same key,
+    whether we're deciding what to reuse from cache or what counts as a
+    duplicate row in the database.
     """
     raw = (
         f"{get_current_data_version()}|{normalize_query(start_query)}|{normalize_query(finish_query)}|"
         f"{mpg}|{tank_capacity_miles}|{corridor_miles}"
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _release_lock(lock_key: str, token: str) -> None:
+    # Only release if we still own it. Without this check, a lock that
+    # outlived its TTL (a slow computation) could get picked up by a second
+    # request, and then the first request's cleanup would delete the
+    # *second* request's lock instead of its own -- reproduced this with a
+    # shortened TTL: it let a third request in too, cascading past a lock
+    # that was supposed to only ever have one holder at a time. Not
+    # perfectly atomic (get-then-delete has its own tiny race), but it's a
+    # best-effort lock to begin with -- this closes the one failure mode
+    # that made it actively harmful rather than just occasionally useless.
+    if cache.get(lock_key) == token:
+        cache.delete(lock_key)
 
 
 def compute_route_plan(
@@ -114,19 +132,24 @@ def compute_route_plan(
     result_key = f"route-plan-result:v1:{plan_key}"
     lock_key = f"route-plan-lock:v1:{plan_key}"
 
-    cached_result = cache.get(result_key)
-    if cached_result is not None:
-        return cached_result
+    cached = cache.get(result_key)
+    if cached is not None:
+        if isinstance(cached, PlannerError):
+            raise cached
+        return cached
 
-    got_lock = cache.add(lock_key, "1", _COMPUTE_LOCK_TTL_SECONDS)
+    lock_token = uuid.uuid4().hex
+    got_lock = cache.add(lock_key, lock_token, _COMPUTE_LOCK_TTL_SECONDS)
     if not got_lock:
         waited = 0.0
         while waited < _COMPUTE_LOCK_MAX_WAIT_SECONDS:
             time.sleep(_COMPUTE_LOCK_POLL_INTERVAL_SECONDS)
             waited += _COMPUTE_LOCK_POLL_INTERVAL_SECONDS
-            cached_result = cache.get(result_key)
-            if cached_result is not None:
-                return cached_result
+            cached = cache.get(result_key)
+            if cached is not None:
+                if isinstance(cached, PlannerError):
+                    raise cached
+                return cached
         # Gave up waiting for the in-flight computation -- proceed
         # independently rather than hang or fail.
 
@@ -168,6 +191,9 @@ def compute_route_plan(
         )
         cache.set(result_key, result, settings.ROUTE_CACHE_TTL_SECONDS)
         return result
+    except PlannerError as exc:
+        cache.set(result_key, exc, _FAILURE_CACHE_TTL_SECONDS)
+        raise
     finally:
         if got_lock:
-            cache.delete(lock_key)
+            _release_lock(lock_key, lock_token)

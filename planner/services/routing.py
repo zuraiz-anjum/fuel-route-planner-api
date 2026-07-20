@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 
 METERS_PER_MILE = 1609.344
 
+# The only two OSRM response codes that actually mean "no road connects
+# these two points" (e.g. Hawaii to the mainland). Everything else non-Ok
+# (TooBig, InvalidQuery, InvalidValue, ...) is a request/service problem,
+# not a geographic fact -- lumping those in under "no route exists" was
+# itself a bug: it hid a real integration issue behind a message that
+# sounds like a permanent, nothing-to-be-done answer.
+_NO_ROUTE_CODES = {"NoRoute", "NoSegment"}
+
 
 @dataclass(frozen=True)
 class RouteResult:
@@ -75,8 +83,11 @@ def get_route(origin: Coordinates, destination: Coordinates) -> RouteResult:
         raise RoutingError("The routing service returned an unexpected response.")
 
     if payload.get("code") != "Ok" or not payload.get("routes"):
-        detail = payload.get("message") or payload.get("code") or "no route was found"
-        raise RoutingError(f"No driving route exists between these locations ({detail}).")
+        code = payload.get("code")
+        detail = payload.get("message") or code or "no route was found"
+        if code in _NO_ROUTE_CODES:
+            raise RoutingError(f"No driving route exists between these locations ({detail}).")
+        raise RoutingError(f"The routing service could not process this request ({detail}).")
 
     route = payload["routes"][0]
     coordinates = route["geometry"]["coordinates"]  # GeoJSON order: [lng, lat]

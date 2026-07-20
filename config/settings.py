@@ -205,6 +205,16 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": os.environ.get("API_ANON_THROTTLE_RATE", "60/min"),
     },
+    # DRF trusts X-Forwarded-For as-is when NUM_PROXIES isn't set, which means
+    # a client can just send a different fake value on every request and
+    # never be throttled -- tested this against the demo server and it works
+    # (60/min becomes no limit at all). NUM_PROXIES=0 makes it ignore that
+    # header entirely and throttle by REMOTE_ADDR, which is what you want
+    # with no reverse proxy in front (local/docker-compose). Behind a real
+    # load balancer (GCP, nginx, etc.) set DJANGO_TRUSTED_PROXY_COUNT to how
+    # many proxy hops sit in front of the app, so DRF only trusts that many
+    # entries from the end of the header instead of the whole thing.
+    "NUM_PROXIES": int(os.environ.get("DJANGO_TRUSTED_PROXY_COUNT", "0")),
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "EXCEPTION_HANDLER": "planner.exceptions.api_exception_handler",

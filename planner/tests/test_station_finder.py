@@ -62,3 +62,23 @@ class FindStationsNearRouteTests(TestCase):
         narrow = {r.station.opis_id for r in find_stations_near_route(self.route_path, corridor_miles=1)}
         self.assertIn(5, wide)
         self.assertNotIn(5, narrow)
+
+    def test_a_station_the_route_passes_near_twice_is_returned_for_both_encounters(self):
+        # A station sitting at a spot the route revisits far apart in
+        # mileage (a spur, a cloverleaf, two legs running close together)
+        # used to only ever show up at whichever encounter happened to be
+        # the single closest match -- the other one was silently dropped, so
+        # a station only reachable on the second pass looked unavailable.
+        same_lat, same_lng = 40.0, -87.0
+        route_path = RoutePath(
+            latitudes=np.array([40.0, same_lat, 41.0, 42.0, same_lat, 40.0]),
+            longitudes=np.array([-90.0, same_lng, -89.5, -89.2, same_lng, -88.0]),
+            cumulative_miles=np.array([0.0, 60.0, 150.0, 300.0, 560.0, 620.0]),
+        )
+        revisited = Station.objects.create(
+            opis_id=6, name="Revisited", city="X", state="IL",
+            price_per_gallon="3.00", latitude=same_lat, longitude=same_lng,
+        )
+        results = [r for r in find_stations_near_route(route_path, corridor_miles=8) if r.station.pk == revisited.pk]
+        positions = sorted(r.distance_along_route_miles for r in results)
+        self.assertEqual(positions, [60.0, 560.0])

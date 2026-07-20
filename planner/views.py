@@ -57,16 +57,13 @@ class RoutePlanViewSet(
 
     @staticmethod
     def _get_or_persist(plan_key: str, start_query: str, finish_query: str, result) -> tuple[RoutePlan, bool]:
-        """Returns (route_plan, created). The database's unique constraint
-        on RoutePlan.plan_key -- not this method's ordering -- is what
-        actually guarantees at most one row per logical plan even under
-        concurrent identical requests: two requests can both pass the
-        "does it exist yet" check below at the same time (a plain cache
-        check has exactly this race, reproduced directly: 8 concurrent
-        identical requests produced 2 persisted rows before this fix), but
-        only one of them can win the subsequent INSERT: the DB rejects the
-        second with an IntegrityError, which is caught here and turned into
-        "fetch the winner's row" instead of a 500 or a duplicate.
+        """Returns (route_plan, created). Two concurrent requests can both
+        pass the "does it exist yet" check below at the same time (checked
+        this directly -- 8 concurrent requests produced 2 rows before this
+        was fixed), so the real guarantee isn't this method's ordering, it's
+        RoutePlan.plan_key's unique constraint: only one of them wins the
+        INSERT, and the loser's IntegrityError gets caught here and turned
+        into "go fetch the winner's row" instead of a crash or a duplicate.
         """
         existing = RoutePlan.objects.prefetch_related("fuel_stops").filter(plan_key=plan_key).first()
         if existing is not None:

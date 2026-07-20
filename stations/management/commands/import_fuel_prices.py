@@ -116,6 +116,22 @@ class Command(BaseCommand):
             f"(skipped {skipped_non_us:,} non-US rows, {skipped_bad_row:,} malformed rows)."
         )
 
+        # Stations already geocoded via the one-off Nominatim pass
+        # (geocode_remaining_stations) won't be in city_reference either --
+        # that's exactly why they needed that pass. Without this, re-running
+        # this command (e.g. a routine price refresh) would blow away that
+        # work: bulk_create's update_conflicts overwrites latitude/longitude/
+        # geocode_source unconditionally, and the fresh lookup below would
+        # come back empty for those same rows every time, resetting them to
+        # ungeocoded. So: only treat a station as "still unresolved" if we
+        # don't already have coordinates for it from a previous run.
+        previously_geocoded = {
+            opis_id: (lat, lng, source)
+            for opis_id, lat, lng, source in Station.objects.exclude(latitude__isnull=True).values_list(
+                "opis_id", "latitude", "longitude", "geocode_source"
+            )
+        }
+
         stations: list[Station] = []
         unmatched_cities: set[tuple[str, str]] = set()
         for data in grouped.values():
@@ -123,6 +139,8 @@ class Command(BaseCommand):
             coords = city_reference.get(key)
             if coords:
                 lat, lng, source = coords[0], coords[1], "city_reference"
+            elif data["opis_id"] in previously_geocoded:
+                lat, lng, source = previously_geocoded[data["opis_id"]]
             else:
                 lat, lng, source = None, None, ""
                 unmatched_cities.add(key)

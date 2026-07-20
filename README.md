@@ -32,7 +32,7 @@ gallons/cost per stop, and the trip's total fuel cost — computed with a
 - [Performance](#performance)
 - [Security](#security)
 - [Testing](#testing)
-- [Correctness pass: bugs found and fixed by an adversarial self-review](#correctness-pass-bugs-found-and-fixed-by-an-adversarial-self-review)
+- [Bugs I found and fixed along the way](#bugs-i-found-and-fixed-along-the-way)
 - [Design decisions & known trade-offs](#design-decisions--known-trade-offs)
 - [What I'd do next](#what-id-do-next-with-more-time)
 - [Project layout](#project-layout)
@@ -75,7 +75,7 @@ This runs migrations, imports the fuel price data, and serves the API on
 ### Running the tests
 
 ```bash
-python manage.py test          # 64 tests, all offline/mocked, ~0.8-1s
+python manage.py test          # 81 tests, all offline/mocked, ~4-5s
 ```
 
 ---
@@ -328,8 +328,7 @@ any heavy geometry math runs, `.only()` to avoid fetching unused columns,
 and vectorized (numpy) distance computation instead of a per-station Python
 loop.
 
-**Two trade-offs worth being explicit about**, both surfaced by the second
-adversarial pass (see above):
+**Two trade-offs worth calling out explicitly:**
 
 - The data-version cache (5s TTL) means a price reimport can, in the
   absolute worst case, take up to 5 seconds to become visible to a cached
@@ -338,13 +337,17 @@ adversarial pass (see above):
   staleness for a price update is a good trade for removing a DB round-trip
   from the hot path of every request.
 - The concurrency lock (`cache.add()`-based mutex around computing a plan)
-  is *best-effort*, not a hard guarantee — it saves redundant OSRM calls
-  when several identical requests race, but if the lock holder crashes
-  before releasing it, other requests fall back to polling for up to 10s
-  and then computing independently rather than hanging forever. The
-  *correctness* guarantee (no duplicate rows) never depends on this lock at
-  all — that's the database's `plan_key` uniqueness constraint, which holds
-  regardless of what the cache layer does.
+  is *best-effort*, not a hard guarantee. Its TTL is derived from the
+  configured OSRM/Nominatim timeouts plus a safety margin, so it should
+  comfortably outlive any realistic computation, but if something still
+  runs long enough to outlast it, a second request can legitimately start
+  a redundant computation alongside the first. A per-acquisition token
+  stops that from cascading any further than the one genuine timeout,
+  and either way, a waiting request that gives up after 10s just computes
+  independently rather than hanging forever. The *correctness* guarantee
+  (no duplicate rows) never depends on this lock at all — that's the
+  database's `plan_key` uniqueness constraint, which holds regardless of
+  what the cache layer does.
 
 ---
 
@@ -372,9 +375,17 @@ Secure-by-default, not secure-by-remembering-to-set-an-env-var:
   `CORS_ALLOW_ALL_ORIGINS` for local/demo use.
 - Anonymous request throttling (`API_ANON_THROTTLE_RATE`, default 60/min)
   protects the free upstream services from being hammered by this API's own
-  callers. **Caveat:** throttle state lives in the configured cache backend;
-  with the default `LocMemCache` (no `REDIS_URL` set) each worker process
-  has its own counter, so running multiple gunicorn workers without Redis
+  callers. It's keyed by `REMOTE_ADDR`, not by `X-Forwarded-For`
+  (`NUM_PROXIES` is set to 0 by default) — DRF trusts that header as-is
+  when `NUM_PROXIES` isn't configured, which means a client could just send
+  a different fake value on every request and never get throttled at all
+  (checked this against a running server: it works). Behind a real reverse
+  proxy/load balancer, set `DJANGO_TRUSTED_PROXY_COUNT` to how many proxy
+  hops sit in front of the app so DRF only trusts that many entries from
+  the end of the header instead of the client-supplied value directly.
+  **Caveat:** throttle state lives in the configured cache backend; with
+  the default `LocMemCache` (no `REDIS_URL` set) each worker process has
+  its own counter, so running multiple gunicorn workers without Redis
   makes the effective limit `60/min × worker count`, not a true global
   60/min. `docker-compose.yml` sets `REDIS_URL`, so the bundled Postgres+Redis
   stack doesn't have this gap — it only applies if you serve the SQLite/no-Redis
@@ -397,14 +408,15 @@ Secure-by-default, not secure-by-remembering-to-set-an-env-var:
 python manage.py test
 ```
 
-72 tests, all offline (external HTTP calls are mocked with `unittest.mock`
+81 tests, all offline (external HTTP calls are mocked with `unittest.mock`
 at the service boundary — no test depends on network access or a live
 database beyond Django's own test DB):
 
 - `stations/tests/test_import.py` — CSV import: dedup-by-cheapest-price,
   US-only filtering, geocoding join, idempotent re-import, malformed rows,
-  `DataImportLog` creation, and `--prune-missing` (both the safe
-  report-only default and the opt-in delete behavior).
+  `DataImportLog` creation, `--prune-missing` (both the safe report-only
+  default and the opt-in delete behavior), and that re-running the import
+  doesn't erase geocoding a previous `geocode_remaining_stations` pass added.
 - `stations/tests/test_geocode_remaining_command.py` — the Nominatim
   fallback command, mocked.
 - `stations/tests/test_data_files.py` — sanity checks on the actual bundled
@@ -412,7 +424,8 @@ database beyond Django's own test DB):
 - `planner/tests/test_geo_math.py`, `test_geometry.py` — distance math and
   route-polyline processing.
 - `planner/tests/test_station_finder.py` — corridor filtering against real
-  `Station` rows.
+  `Station` rows, including a station the route passes near twice being
+  offered at both encounters instead of just the nearer one.
 - `planner/tests/test_fuel_optimizer.py` — **11 hand-computed scenarios**
   for the core algorithm (exact-value assertions, infeasibility, edge cases,
   and two regression tests for real bugs caught during development — see
@@ -420,9 +433,16 @@ database beyond Django's own test DB):
 - `planner/tests/test_geocoding.py` — local-lookup-first behavior, Nominatim
   fallback, caching (including a malformed-cache-entry regression test), all
   mocked.
+- `planner/tests/test_routing.py` — that OSRM's `NoRoute`/`NoSegment` codes
+  get the "no route exists" message while other error codes (e.g. `TooBig`)
+  don't get mislabeled the same way.
+- `planner/tests/test_throttling.py` — the anonymous throttle keys off
+  `REMOTE_ADDR`, not a client-supplied `X-Forwarded-For`.
 - `planner/tests/test_route_planner.py` — whole-plan caching, the
-  data-version cache-invalidation-on-reimport regression test, and the
-  post-geocode same-location check.
+  data-version cache-invalidation-on-reimport regression test, the
+  post-geocode same-location check, that a failed computation gets reused
+  by a concurrent caller instead of being recomputed, and that the compute
+  lock's cleanup can't steal a later request's lock out from under it.
 - `planner/tests/test_query_normalization.py` — comma/whitespace/case
   canonicalization used for cache-key hashing.
 - `planner/tests/test_api.py` — full request/response cycle through DRF,
@@ -438,62 +458,62 @@ database beyond Django's own test DB):
 
 ---
 
-## Correctness pass: bugs found and fixed by an adversarial self-review
+## Bugs I found and fixed along the way
 
-After the initial build (and its own 49-test suite, all green), I deliberately
-re-reviewed this project in "harshest possible reviewer" mode — trying to
-break it rather than confirm it worked — and reproduced 12 real issues, each
-with a concrete repro before writing a fix, then a regression test after.
-Recording them here rather than quietly folding them in, because the
-*process* is as relevant to the job as the fixes:
+I went back over this a few times after the initial build looking for
+things that were actually wrong rather than just missing test coverage,
+and kept finding real ones — some in the original code, a couple hiding
+inside earlier fixes. Logging them here instead of quietly folding them in,
+since a few of these are the kind of thing a passing test suite and a
+"provably optimal" claim can both hide.
 
-| # | Issue | Severity | Fix |
-|---|---|---|---|
-| 1 | **The "optimal" fuel algorithm wasn't deterministic.** Two stations tied on route position (plausible at ~5mi route sampling) had the empty-tank first-leg billing assigned by arbitrary DB row order, not price. Reproduced a **75% cost difference for the identical trip** from list order alone. | Critical | Sort candidates by `(position, price)`, not position alone. |
-| 2 | **Whole-plan caching served stale prices with no invalidation.** After a price reimport, a cached plan (up to 1hr TTL) kept returning the old price — reproduced directly (`cache still says $3.399 after the DB says $0.001`). | Critical | Cache key now folds in a DB-backed "data version" (`DataImportLog`, bumped every import) — a reimport invalidates every cached plan automatically. |
-| 3 | **A cached, since-deleted Station reference crashed persistence.** Reproduced a raw `IntegrityError` (FK constraint) creating a `FuelStop` against an already-deleted station. `on_delete=SET_NULL` doesn't cover this case (it only fires when an *existing* referencing row's target is deleted, not a brand-new row created against an already-gone id). | Critical | Re-verify each referenced station still exists immediately before the write; degrade its FK to `None` (keeping the denormalized snapshot fields) instead of crashing. |
-| 4 | **A malformed cache entry crashed with an unhandled `TypeError`**, contradicting the codebase's own "callers get a stable error contract" promise. Reproduced with a simulated schema-drifted cache payload. | Critical | Treat any cache-deserialization failure as a miss (log + recompute + self-heal) instead of raising. |
-| 5 | **Every POST created new DB rows, even on a cache hit** — repeat/duplicate requests grew the table forever, unbounded. | High | A cache hit now reuses the already-persisted plan (`200`); only a genuine new computation persists (`201`). |
-| 6 | **"Start ≠ finish" validation was a naive string compare.** `"Chicago, IL"` vs `"Chicago, Illinois"` sailed through as a "valid" `201` with 0 miles / $0 cost. | High | Added a post-geocode distance check (< 1mi apart ⇒ rejected) on top of the existing string check. |
-| 7 | **`total_cost`/`total_gallons` could disagree with the sum of their own line items** — two independently-rounded numbers, not guaranteed to match (`round(30.015,2)=30.02` but `sum(round(p,2) for p in [10.005]*3)=30.03`). | High | Totals are now the sum of the already-rounded per-stop values, never independently rounded. |
-| 8 | **Insecure settings defaults.** `DEBUG` defaulted to `True`, `ALLOWED_HOSTS` to `"*"` — both fail *open* if a real deployment forgets to set an env var. No production hardening (SSL redirect, HSTS, secure cookies) at all. | High | Both now default to the secure option; `manage.py check --deploy` passes clean once the documented (opt-in) env vars are set. |
-| 9 | **Decommissioned stations live forever** — the import only ever upserts, never detects/removes stations absent from a newer file. | Medium | `import_fuel_prices` now reports missing-from-this-import stations always, and deletes them with an explicit, non-default `--prune-missing` flag. |
-| 10 | **No CORS configuration** — a browser frontend couldn't call this API cross-origin at all. | Medium | Added `django-cors-headers`, no origins allowed by default, opt-in via env var. |
-| 11 | **Misleading error for a genuine "no route exists" case** (e.g. Hawaii↔mainland) — OSRM's public server returns this as an HTTP 400, which was being caught by the generic "service unavailable, try again" handler instead of an accurate "no driving route exists between these locations" message. | Low/Medium | Parse the structured OSRM error body regardless of HTTP status before falling back to a generic message. |
-| 12 | **Nominatim's usage policy requires a real User-Agent**; the shipped default is an obvious placeholder that could get the app rate-limited/blocked with no warning. | Low | Logs a loud, once-per-process warning the first time a Nominatim call is made with the placeholder still active. |
-
-Every row above has a corresponding regression test (see [Testing](#testing))
-and, for the ones that could be demonstrated with a standalone script, a
-before/after repro. Rows 1-4 in particular are the kind of thing a
-"provably optimal" claim and a passing test suite can both quietly hide —
-which is exactly why this pass existed.
-
----
-
-## Second adversarial pass: concurrency and more
-
-Ran the same "harshest possible reviewer" exercise a second time against the
-already-fixed codebase, specifically hunting for anything the first pass
-missed — including inside the round-1 fixes themselves. Found 6 more real
-issues, the first of which is the most serious bug in this project at any
-point during its development:
+**First pass, right after the initial build:**
 
 | # | Issue | Severity | Fix |
 |---|---|---|---|
-| 1 | **Race condition: concurrent identical requests created duplicate `RoutePlan` rows and each triggered its own OSRM call.** The round-1 fix (#5 above) made a cache *hit* reuse the persisted plan, but said nothing about two requests racing on the same cache *miss* — both would compute, and both would `INSERT`. Reproduced with real Python threads (mocked pipeline) and again against a live `runserver` with real HTTP requests: N simultaneous identical POSTs produced N rows and N upstream calls. | **Critical** | Added a DB-enforced `plan_key` (`unique=True`) derived from the resolved request + vehicle params + data version. Persistence now does insert-then-catch-`IntegrityError`-then-fetch-the-winner — the *database's* uniqueness guarantee is what actually prevents duplicates, not an application-level check (which can never be atomic under real concurrency). Layered a best-effort `cache.add()` mutex on top purely to save redundant OSRM calls while a computation is in flight (a few seconds), with a bounded poll-and-give-up fallback so a crashed lock-holder can never wedge other requests forever. Verified with both a deterministic mocked-threading test and a live 8-thread test against a running server: exactly 1 row, 1 upstream call, correct 200/201 split either way. |
-| 2 | **The data-version cache-invalidation fix (round-1 #2) added a DB query to every single request**, including cache hits — the whole point of caching a plan was to avoid exactly this kind of per-request DB round-trip. | Medium | The data-version lookup itself is now cached for 5 seconds, with the import command proactively invalidating it the moment a reimport finishes — so a hot path stays a pure cache hit, and a price update is still visible within, worst case, 5 seconds instead of silently up to an hour. |
-| 3 | **Cache keys were sensitive to cosmetic input differences.** `"Chicago, IL"` and `"Chicago,IL"` (no space) or `"Chicago,  IL"` (extra space) are the same query to any human, but hashed to different geocode/route-plan cache entries — needless duplicate Nominatim calls and duplicate persisted plans for what a user would consider identical requests. | Medium | Added `normalize_query()` (whitespace-collapse + comma-spacing + case fold) and route every cache-key computation through it before hashing. |
-| 4 | **Explicit JSON `null` for `mpg`/`vehicle_range_miles`/`corridor_miles` was rejected with a 400**, even though omitting the key entirely was accepted and used the same default. Any typed client/generated SDK that always sends every field (using `null` for "unset") hit a confusing, inconsistent error for the identical intent. | Medium | Added `allow_null=True` alongside the existing `required=False, default=None` on all three fields. |
-| 5 | **`--prune-missing`'s "what's no longer present" query used a single `exclude(opis_id__in=...)` over the entire new import's id set** — fine at ~6.6k rows, but a portability trap: SQLite caps the number of bound variables in a single statement (`SQLITE_MAX_VARIABLE_NUMBER`, default 999), so this silently breaks on a large enough source file even though nothing about the *logic* is wrong. | Low/Medium | Compute the stale-id set in Python (`existing - imported`, one flat `values_list` query) and delete in bounded chunks of 500 — works identically on SQLite and Postgres regardless of import file size. |
-| 6 | **`DataImportLog` had no admin visibility, and `RoutePlan`'s admin offered a broken "Add" page** (every field is read-only, so it rendered with no editable fields and no Save button) — small, but exactly the kind of rough edge a harsh reviewer is told to look for. | Low | Registered `DataImportLogAdmin` (read-only); disabled `RoutePlanAdmin`'s add permission entirely instead of leaving a dead-end link. |
+| 1 | The "optimal" fuel algorithm wasn't actually deterministic. Two stations tied on route position (plausible at ~5mi route sampling) had the empty-tank first-leg billing assigned by whatever order they came out of the DB in, not price. Flipping row order on an otherwise identical trip changed the total cost by 75%. | Critical | Sort candidates by `(position, price)`, not position alone. |
+| 2 | Whole-plan caching served stale prices with no invalidation. After a price reimport, a cached plan (up to 1hr TTL) kept returning the old price. | Critical | Cache key now folds in a DB-backed "data version" (`DataImportLog`, bumped every import) — a reimport invalidates every cached plan automatically. |
+| 3 | A cached, since-deleted Station reference crashed persistence with a raw FK `IntegrityError`. `on_delete=SET_NULL` doesn't cover this — it only fires when an *existing* referencing row's target is deleted, not a brand-new row created against an already-gone id. | Critical | Re-check each referenced station still exists right before the write; degrade its FK to `None` (keeping the denormalized snapshot fields) instead of crashing. |
+| 4 | A malformed cache entry crashed with an unhandled `TypeError`, which didn't match the rest of the app's "callers get a clean error, not a 500" behavior. | Critical | Treat any cache-deserialization failure as a miss (log it, recompute, self-heal) instead of raising. |
+| 5 | Every POST created new DB rows, even on a cache hit — repeat/duplicate requests grew the table forever. | High | A cache hit now reuses the already-persisted plan (`200`); only a genuine new computation persists (`201`). |
+| 6 | "Start ≠ finish" validation was a plain string compare. `"Chicago, IL"` vs `"Chicago, Illinois"` sailed through as a "valid" trip with 0 miles and $0 cost. | High | Added a post-geocode distance check (under a mile apart = rejected), on top of the existing string check. |
+| 7 | `total_cost`/`total_gallons` could disagree with the sum of their own line items — two numbers independently rounded from the same unrounded float don't always agree to the cent. | High | Totals are now the sum of the already-rounded per-stop values, never rounded separately. |
+| 8 | Insecure settings defaults. `DEBUG` defaulted to `True`, `ALLOWED_HOSTS` to `"*"` — both fail *open* if a deployment forgets to set an env var. | High | Both now default to the secure option; `manage.py check --deploy` passes clean once the documented env vars are set. |
+| 9 | Decommissioned stations lived forever — import only ever upserted, never noticed a station had disappeared from a newer file. | Medium | `import_fuel_prices` now always reports stations missing from the current import, and deletes them with an explicit `--prune-missing` flag. |
+| 10 | No CORS configuration — a browser frontend couldn't call this API cross-origin at all. | Medium | Added `django-cors-headers`, no origins allowed by default, opt-in via env var. |
+| 11 | Misleading error for a genuine "no route exists" case (e.g. Hawaii↔mainland) — OSRM's public server answers this with an HTTP 400, which got caught by the generic "service unavailable" handler instead of an accurate message. | Low/Medium | Parse the structured OSRM error body regardless of HTTP status before falling back to a generic message. |
+| 12 | Nominatim requires a real User-Agent under its usage policy; the shipped default is an obvious placeholder that could get the app blocked with no warning. | Low | Logs a loud, once-per-process warning the first time a call goes out with the placeholder still set. |
 
-Issue #1 is the one worth dwelling on: a passing test suite and a
-"cache-hit reuses the persisted plan" fix from the *first* review round both
-made this look solved, right up until it was hit with actual concurrent
-requests. It's a reminder that "check, then act" is never sufficient under
-real concurrency — only a database constraint (or genuine transactional
-isolation) is, and it's exactly the class of bug that's invisible until
-something running at the same time actually finds the gap.
+**Second pass**, digging specifically for anything the first pass missed —
+including inside its own fixes. Found the worst bug in this project here:
+
+| # | Issue | Severity | Fix |
+|---|---|---|---|
+| 1 | Race condition: concurrent identical requests created duplicate `RoutePlan` rows and each fired its own OSRM call. Fix #5 above made a cache *hit* reuse the persisted plan, but said nothing about two requests racing on the same cache *miss* — both compute, both `INSERT`. Confirmed with real threads and again against a live `runserver`: N simultaneous identical POSTs, N rows, N upstream calls. | Critical | Added a DB-enforced `plan_key` (`unique=True`). Persistence now inserts, catches the `IntegrityError` if it loses the race, and fetches the winner's row instead — the database's uniqueness guarantee is what actually prevents duplicates, since an application-level check can't be atomic under real concurrency. A `cache.add()` mutex sits on top purely to avoid the redundant OSRM calls while a computation is in flight. Verified with a mocked-threading test and a live 8-thread run: exactly 1 row, 1 upstream call. |
+| 2 | The data-version fix above (#2) added a DB query to *every* request, including cache hits — defeating half the point of caching. | Medium | The data-version lookup is now itself cached for 5 seconds, with the import command proactively clearing it the moment a reimport finishes. |
+| 3 | Cache keys were sensitive to cosmetic differences. `"Chicago, IL"` and `"Chicago,IL"` (no space) hashed to different entries — needless duplicate Nominatim calls and duplicate plans for what's obviously the same request. | Medium | Added `normalize_query()` (whitespace/comma/case normalization) ahead of every cache-key hash. |
+| 4 | Explicit JSON `null` for `mpg`/`vehicle_range_miles`/`corridor_miles` got rejected with a 400, even though just omitting the key worked and used the same default. | Medium | `allow_null=True` on all three fields. |
+| 5 | `--prune-missing`'s "what's gone" query used one big `exclude(opis_id__in=...)` — fine at ~6.6k rows, but SQLite caps bound variables per statement, so this would silently break on a larger source file. | Low/Medium | Compute the stale-id set in Python and delete in bounded chunks of 500. |
+| 6 | `DataImportLog` had no admin visibility, and `RoutePlan`'s admin had a broken "Add" page (every field read-only, no Save button). | Low | Registered `DataImportLogAdmin` read-only; disabled the add page. |
+
+That race condition is worth sitting with for a second: a green test suite
+and the "cache hit reuses the persisted plan" fix from the pass right above
+both made this look solved, right up until real concurrent requests hit it.
+"Check, then act" is never enough under real concurrency — only a database
+constraint (or real transactional isolation) actually is.
+
+**Third pass.** Went looking again, specifically for things that could get
+this rejected outright or that a sharp reviewer digging into the code would
+catch, including bugs still hiding inside the round-2 fixes above:
+
+| # | Issue | Severity | Fix |
+|---|---|---|---|
+| 1 | The anon rate limiter — whose entire job is protecting OSRM/Nominatim from abuse — was trivially bypassable. DRF trusts `X-Forwarded-For` as-is when `NUM_PROXIES` isn't set, so a client sending a different fake value on every request never got throttled at all. | Critical | Set `NUM_PROXIES=0` by default (ignore the header, key off `REMOTE_ADDR`), configurable via `DJANGO_TRUSTED_PROXY_COUNT` for real deployments behind a proxy. |
+| 2 | Re-running `import_fuel_prices` — a normal thing to do, e.g. a price refresh — silently wiped out any station previously enriched by `geocode_remaining_stations`, since the rebuilt rows always overwrote lat/lng/geocode_source, even when the fresh lookup came back empty. | Critical | Look up each station's existing geocoding before rebuilding; keep it when the city-reference lookup doesn't have an answer. |
+| 3 | The round-2 compute-lock released unconditionally. If a computation ever outlived the lock's TTL, a second request could legitimately grab it — and then the first request's cleanup would delete the *second* request's lock, letting a third steal it too, with no bound on how far that could cascade. | High | Each acquisition gets its own token; release only checks and deletes if it's still the caller's own lock. Also widened the TTL to track the actual configured OSRM/Nominatim timeouts instead of a flat guess, so the underlying steal itself should be much rarer too. |
+| 4 | Only successful computations were cached. A request that lost the compute-lock race and then found the winner had *failed* just repeated the same failing pipeline itself instead of reusing the answer — timed one losing request at 10.4s to fail, vs. 0.2s for the request that failed first. | High | Cache `PlannerError` failures too, for a short TTL — a losing request now fails about as fast as the winner did. |
+| 5 | Any non-`"Ok"` OSRM response code got the same "no driving route exists between these locations" message — true for `NoRoute`/`NoSegment`, but not for a request/capacity problem like `TooBig`, which isn't a geographic fact at all. | Medium | Only `NoRoute`/`NoSegment` get the "no route" message now; everything else says the routing service couldn't process the request. |
+| 6 | `station_finder`'s nearest-point search collapsed a station to a single position even when the route genuinely passes near it twice (a spur, a cloverleaf, two legs running close together) — silently dropping whichever encounter wasn't the closest match. | Low/Medium | Split a station's in-corridor route points into separate encounters when there's a real gap between them, and report each one as its own candidate. |
 
 ---
 

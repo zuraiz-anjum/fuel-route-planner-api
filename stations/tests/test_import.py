@@ -121,3 +121,26 @@ class ImportFuelPricesTests(TestCase):
 
         self.assertFalse(Station.objects.filter(opis_id=13).exists(), "should be pruned: absent + flag set")
         self.assertTrue(Station.objects.filter(opis_id=14).exists())
+
+    def test_reimport_does_not_wipe_out_previous_nominatim_geocoding(self):
+        # This one actually happened: a station outside the bundled city
+        # reference stays ungeocoded after import (see
+        # test_unresolved_city_left_ungeocoded above) until
+        # geocode_remaining_stations fills it in via Nominatim. Re-running
+        # this command afterwards -- a completely normal thing to do, e.g.
+        # to pick up a price update -- rebuilt every Station row from
+        # scratch and overwrote latitude/longitude/geocode_source with the
+        # (still-empty) city-reference lookup, silently erasing that
+        # enrichment every time.
+        self._run_import(['15,MYSTERY STOP,"Nowhere Rd",Nowheresville,IL,100,3.900'])
+        Station.objects.filter(opis_id=15).update(
+            latitude=39.5, longitude=-89.1, geocode_source="nominatim"
+        )
+
+        self._run_import(['15,MYSTERY STOP,"Nowhere Rd",Nowheresville,IL,100,3.500'])  # e.g. a price refresh
+
+        station = Station.objects.get(opis_id=15)
+        self.assertEqual(station.latitude, 39.5)
+        self.assertEqual(station.longitude, -89.1)
+        self.assertEqual(station.geocode_source, "nominatim")
+        self.assertEqual(station.price_per_gallon, Decimal("3.500"), "the price should still update normally")
