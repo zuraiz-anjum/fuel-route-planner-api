@@ -8,7 +8,7 @@ from django.db import transaction
 
 from stations.constants import US_STATE_CODES
 from stations.geodata import load_city_reference
-from stations.models import Station
+from stations.models import DataImportLog, Station
 
 
 class Command(BaseCommand):
@@ -30,6 +30,18 @@ class Command(BaseCommand):
             "--cities-path",
             default=str(settings.US_CITIES_REFERENCE_CSV),
             help="Path to the bundled city/state -> lat/lng reference CSV.",
+        )
+        parser.add_argument(
+            "--prune-missing",
+            action="store_true",
+            help=(
+                "Delete existing stations whose opis_id is NOT present in this import "
+                "(i.e. genuinely removed from the source file -- closed/decommissioned "
+                "truck stops). Off by default: only use this with a complete, "
+                "authoritative source file -- running it against a partial/test CSV "
+                "will delete most of your station table. Without this flag, stations "
+                "missing from the current file are left untouched but reported."
+            ),
         )
 
     def handle(self, *args, **options):
@@ -136,6 +148,32 @@ class Command(BaseCommand):
                 ],
                 unique_fields=["opis_id"],
             )
+
+            # Anything already in the DB whose opis_id doesn't appear anywhere
+            # in *this* file no longer exists in the source data -- report it
+            # always, and only actually delete it when explicitly asked to
+            # (see --prune-missing help text for why this isn't the default).
+            stale_qs = Station.objects.exclude(opis_id__in=grouped.keys())
+            stale_count = stale_qs.count()
+            if stale_count:
+                if options["prune_missing"]:
+                    stale_qs.delete()
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"Pruned {stale_count:,} station(s) no longer present in this import "
+                            "(--prune-missing was set)."
+                        )
+                    )
+                else:
+                    self.stdout.write(
+                        self.style.WARNING(
+                            f"{stale_count:,} previously-imported station(s) are not present in this "
+                            "file (possibly decommissioned). Left untouched -- re-run with "
+                            "--prune-missing to remove them."
+                        )
+                    )
+
+            DataImportLog.objects.create(station_count=len(stations))
 
         geocoded = sum(1 for s in stations if s.latitude is not None)
         self.stdout.write(

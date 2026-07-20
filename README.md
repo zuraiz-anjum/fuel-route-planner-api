@@ -30,7 +30,9 @@ gallons/cost per stop, and the trip's total fuel cost — computed with a
 - [Data pipeline & geocoding strategy](#data-pipeline--geocoding-strategy)
 - [External API call budget](#external-api-call-budget)
 - [Performance](#performance)
+- [Security](#security)
 - [Testing](#testing)
+- [Correctness pass: bugs found and fixed by an adversarial self-review](#correctness-pass-bugs-found-and-fixed-by-an-adversarial-self-review)
 - [Design decisions & known trade-offs](#design-decisions--known-trade-offs)
 - [What I'd do next](#what-id-do-next-with-more-time)
 - [Project layout](#project-layout)
@@ -73,7 +75,7 @@ This runs migrations, imports the fuel price data, and serves the API on
 ### Running the tests
 
 ```bash
-python manage.py test          # 49 tests, all offline/mocked, ~0.5-1s
+python manage.py test          # 64 tests, all offline/mocked, ~0.8-1s
 ```
 
 ---
@@ -157,7 +159,7 @@ planner/             Route planning: models, API, and the actual domain logic
 The services layer has no Django-request awareness and no DB writes (aside
 from reading `Station` rows) — it's plain, unit-testable Python. Persistence
 (`RoutePlan`/`FuelStop`) is the view layer's job. This is what lets
-`fuel_optimizer.py` be tested with 9 hand-verified numeric scenarios and zero
+`fuel_optimizer.py` be tested with 11 hand-verified numeric scenarios and zero
 database or network dependency.
 
 ---
@@ -200,17 +202,30 @@ Every numeric example in `planner/tests/test_fuel_optimizer.py` is hand
 computed and asserted exactly (down to the cent/gallon) — including the
 scenario that caught a real bug during development, see below.
 
-> **A bug I found and fixed while writing tests for this:** an early version
-> tracked "fuel remaining" as a signed value that could go negative before
-> the first purchase (to represent the empty-tank assumption above). That's
-> fine for *totals*, but in the "fill up completely" branch it let a single
-> stop compute a purchase *larger than the tank's physical capacity* when
-> the first reachable station wasn't at mile 0. The fix splits each
-> purchase into a capacity-bounded "forward" portion (what has to physically
-> fit in the tank) and a one-time, capacity-exempt "retroactive" portion
-> (billing for ground already covered) — see
-> `test_never_carries_more_than_a_full_tank_forward_from_any_stop`, which
-> specifically guards against regressing this.
+Candidate stations are sorted by **`(position, price)`**, not position
+alone — see [Correctness pass](#correctness-pass-bugs-found-and-fixed-by-an-adversarial-self-review)
+below for why that second sort key isn't optional: two stations tied on
+position (plausible given the route is sampled at ~5mi resolution) used to
+have the empty-tank "first leg" billing assigned to whichever one came
+first in arbitrary DB row order, not the cheaper one — a 75% cost swing for
+an identical trip, caught by a deliberately adversarial review after the
+initial build, and now covered by an explicit regression test.
+
+> **Two bugs I found and fixed while testing this:**
+> 1. An early version tracked "fuel remaining" as a signed value that could
+>    go negative before the first purchase (to represent the empty-tank
+>    assumption above). That's fine for *totals*, but in the "fill up
+>    completely" branch it let a single stop compute a purchase *larger
+>    than the tank's physical capacity* when the first reachable station
+>    wasn't at mile 0. Fixed by splitting each purchase into a
+>    capacity-bounded "forward" portion and a one-time, capacity-exempt
+>    "retroactive" portion — see
+>    `test_never_carries_more_than_a_full_tank_forward_from_any_stop`.
+> 2. Sorting candidates by position alone made the result depend on
+>    arbitrary input/database ordering whenever two stations tied on
+>    position — see `test_tied_position_stations_do_not_change_cost_based_on_input_order`,
+>    which reproduces a **75% cost difference for the identical trip** from
+>    row order alone before the fix (sorting by `(position, price)`).
 
 ---
 
@@ -240,6 +255,14 @@ python manage.py geocode_remaining_stations   # ~1 req/sec per Nominatim's usage
 This is a deliberate, explicit, one-time data-quality command — never
 something the live API calls per-request.
 
+**Decommissioned stations.** A station that disappears from a future price
+sheet (closed truck stop) is reported on every import (`N previously-imported
+station(s) are not present in this file`) but left in place by default —
+running `import_fuel_prices --prune-missing` actually removes them. This is
+opt-in, not automatic: running the import against a partial/test CSV would
+otherwise delete most of a real station table the moment `--prune-missing`
+is the default.
+
 **Known limitation:** station coordinates are city-level centroids, not
 exact street addresses. Two truck stops in the same city will show
 identical coordinates. This is a conscious trade-off for a take-home-sized
@@ -261,8 +284,13 @@ Per computed route:
 | Route (OSRM) | **1** | full geometry + distance + duration requested in the same call (`overview=full&geometries=geojson`) |
 
 **Typical request: 1 external call total. Worst case: 3.** Repeat requests
-for the same (start, finish, mpg, range, corridor) are served from cache
-without calling anything externally (see [Performance](#performance)).
+for the same (start, finish, mpg, range, corridor, *and current station data
+version*) are served from cache without calling anything externally (see
+[Performance](#performance)). That last part matters: the cache key includes
+a timestamp of the latest `import_fuel_prices` run, so re-running the import
+(prices changing) automatically invalidates every previously cached plan
+instead of silently serving stale prices for up to the cache TTL — see
+[Correctness pass](#correctness-pass-bugs-found-and-fixed-by-an-adversarial-self-review).
 
 - **Routing:** [OSRM](http://project-osrm.org/) public demo server — free, no API key.
 - **Geocoding fallback:** [Nominatim](https://nominatim.org/) (OpenStreetMap) — free, no API key, used sparingly.
@@ -289,7 +317,10 @@ Measured on a modest dev machine, non-scientifically but honestly:
 - **End-to-end, repeat request for the same trip:** **well under 100ms** —
   the whole computed plan (geocoding + route + fuel plan) is cached
   (`ROUTE_CACHE_TTL_SECONDS`, default 1 hour), so identical requests never
-  touch OSRM or Nominatim again until the cache expires.
+  touch OSRM or Nominatim again until the cache expires *or the station data
+  changes* (see below) — and the persisted `RoutePlan` row is reused rather
+  than duplicated, so a flood of identical/repeat requests doesn't grow the
+  database unboundedly either.
 
 Query-level choices behind this: indexed `(latitude, longitude)` and
 `(state, city)` columns on `Station`, a cheap bounding-box pre-filter before
@@ -299,18 +330,63 @@ loop.
 
 ---
 
+## Security
+
+Secure-by-default, not secure-by-remembering-to-set-an-env-var:
+
+- `DEBUG` defaults to `False` and `ALLOWED_HOSTS` defaults to
+  `localhost,127.0.0.1,[::1]` — both fail *closed* (generic 500s / rejected
+  Host headers) if you forget to configure them for a real deployment,
+  rather than *open* (leaked stack traces and settings; a wildcard Host
+  header accepted from anyone). Local dev opts **in** to `DEBUG=True` via
+  `.env.example` — that's a deliberate choice you make by copying the file,
+  not the out-of-the-box default.
+- `python manage.py check --deploy` passes clean with zero warnings when the
+  documented production env vars are set (`DJANGO_SECURE_SSL_REDIRECT`,
+  `DJANGO_BEHIND_PROXY`, `DJANGO_SECURE_HSTS_SECONDS`, a real
+  `DJANGO_SECRET_KEY`) — see `config/settings.py`'s hardening block and
+  `.env.example`. SSL redirect/HSTS are opt-in rather than on-by-default
+  specifically because turning them on unconditionally the moment
+  `DEBUG=False` would break `docker-compose up` (plain HTTP, no TLS
+  termination in front of it) with an infinite redirect loop.
+- CORS (`django-cors-headers`) is installed but allows **no origins** by
+  default; opt in per-deployment via `CORS_ALLOWED_ORIGINS` or
+  `CORS_ALLOW_ALL_ORIGINS` for local/demo use.
+- Anonymous request throttling (`API_ANON_THROTTLE_RATE`, default 60/min)
+  protects the free upstream services from being hammered by this API's own
+  callers. **Caveat:** throttle state lives in the configured cache backend;
+  with the default `LocMemCache` (no `REDIS_URL` set) each worker process
+  has its own counter, so running multiple gunicorn workers without Redis
+  makes the effective limit `60/min × worker count`, not a true global
+  60/min. `docker-compose.yml` sets `REDIS_URL`, so the bundled Postgres+Redis
+  stack doesn't have this gap — it only applies if you serve the SQLite/no-Redis
+  configuration with more than one worker process.
+- **No authentication is implemented** — every endpoint is open, including
+  the list endpoint, which is effectively a public log of every start/finish
+  location anyone has queried (compounded by the fact that, before a fix
+  described below, that log also grew without bound). This is a deliberate
+  scope decision for a take-home assignment that never asked for user
+  accounts, not an oversight — but it's a real limitation for anything
+  beyond this exercise. Adding it would mean: an `IsAuthenticated` permission
+  class, a `user` FK on `RoutePlan`, and scoping the list endpoint to
+  `request.user`'s own plans.
+
+---
+
 ## Testing
 
 ```bash
 python manage.py test
 ```
 
-49 tests, all offline (external HTTP calls are mocked with `unittest.mock`
+64 tests, all offline (external HTTP calls are mocked with `unittest.mock`
 at the service boundary — no test depends on network access or a live
 database beyond Django's own test DB):
 
 - `stations/tests/test_import.py` — CSV import: dedup-by-cheapest-price,
-  US-only filtering, geocoding join, idempotent re-import, malformed rows.
+  US-only filtering, geocoding join, idempotent re-import, malformed rows,
+  `DataImportLog` creation, and `--prune-missing` (both the safe
+  report-only default and the opt-in delete behavior).
 - `stations/tests/test_geocode_remaining_command.py` — the Nominatim
   fallback command, mocked.
 - `stations/tests/test_data_files.py` — sanity checks on the actual bundled
@@ -319,14 +395,52 @@ database beyond Django's own test DB):
   route-polyline processing.
 - `planner/tests/test_station_finder.py` — corridor filtering against real
   `Station` rows.
-- `planner/tests/test_fuel_optimizer.py` — **9 hand-computed scenarios**
+- `planner/tests/test_fuel_optimizer.py` — **11 hand-computed scenarios**
   for the core algorithm (exact-value assertions, infeasibility, edge cases,
-  the capacity-overfill regression test described above).
+  and two regression tests for real bugs caught during development — see
+  below).
 - `planner/tests/test_geocoding.py` — local-lookup-first behavior, Nominatim
-  fallback, caching, all mocked.
+  fallback, caching (including a malformed-cache-entry regression test), all
+  mocked.
+- `planner/tests/test_route_planner.py` — whole-plan caching, the
+  data-version cache-invalidation-on-reimport regression test, and the
+  post-geocode same-location check.
 - `planner/tests/test_api.py` — full request/response cycle through DRF,
   including validation errors, infeasible-trip errors, list/retrieve/map
-  endpoints, and the cache-avoids-a-second-routing-call behavior.
+  endpoints, cache-avoids-a-second-routing-call, plan-dedup-on-cache-hit,
+  rounding-consistency, and dangling-FK-after-deletion regression tests.
+
+---
+
+## Correctness pass: bugs found and fixed by an adversarial self-review
+
+After the initial build (and its own 49-test suite, all green), I deliberately
+re-reviewed this project in "harshest possible reviewer" mode — trying to
+break it rather than confirm it worked — and reproduced 12 real issues, each
+with a concrete repro before writing a fix, then a regression test after.
+Recording them here rather than quietly folding them in, because the
+*process* is as relevant to the job as the fixes:
+
+| # | Issue | Severity | Fix |
+|---|---|---|---|
+| 1 | **The "optimal" fuel algorithm wasn't deterministic.** Two stations tied on route position (plausible at ~5mi route sampling) had the empty-tank first-leg billing assigned by arbitrary DB row order, not price. Reproduced a **75% cost difference for the identical trip** from list order alone. | Critical | Sort candidates by `(position, price)`, not position alone. |
+| 2 | **Whole-plan caching served stale prices with no invalidation.** After a price reimport, a cached plan (up to 1hr TTL) kept returning the old price — reproduced directly (`cache still says $3.399 after the DB says $0.001`). | Critical | Cache key now folds in a DB-backed "data version" (`DataImportLog`, bumped every import) — a reimport invalidates every cached plan automatically. |
+| 3 | **A cached, since-deleted Station reference crashed persistence.** Reproduced a raw `IntegrityError` (FK constraint) creating a `FuelStop` against an already-deleted station. `on_delete=SET_NULL` doesn't cover this case (it only fires when an *existing* referencing row's target is deleted, not a brand-new row created against an already-gone id). | Critical | Re-verify each referenced station still exists immediately before the write; degrade its FK to `None` (keeping the denormalized snapshot fields) instead of crashing. |
+| 4 | **A malformed cache entry crashed with an unhandled `TypeError`**, contradicting the codebase's own "callers get a stable error contract" promise. Reproduced with a simulated schema-drifted cache payload. | Critical | Treat any cache-deserialization failure as a miss (log + recompute + self-heal) instead of raising. |
+| 5 | **Every POST created new DB rows, even on a cache hit** — repeat/duplicate requests grew the table forever, unbounded. | High | A cache hit now reuses the already-persisted plan (`200`); only a genuine new computation persists (`201`). |
+| 6 | **"Start ≠ finish" validation was a naive string compare.** `"Chicago, IL"` vs `"Chicago, Illinois"` sailed through as a "valid" `201` with 0 miles / $0 cost. | High | Added a post-geocode distance check (< 1mi apart ⇒ rejected) on top of the existing string check. |
+| 7 | **`total_cost`/`total_gallons` could disagree with the sum of their own line items** — two independently-rounded numbers, not guaranteed to match (`round(30.015,2)=30.02` but `sum(round(p,2) for p in [10.005]*3)=30.03`). | High | Totals are now the sum of the already-rounded per-stop values, never independently rounded. |
+| 8 | **Insecure settings defaults.** `DEBUG` defaulted to `True`, `ALLOWED_HOSTS` to `"*"` — both fail *open* if a real deployment forgets to set an env var. No production hardening (SSL redirect, HSTS, secure cookies) at all. | High | Both now default to the secure option; `manage.py check --deploy` passes clean once the documented (opt-in) env vars are set. |
+| 9 | **Decommissioned stations live forever** — the import only ever upserts, never detects/removes stations absent from a newer file. | Medium | `import_fuel_prices` now reports missing-from-this-import stations always, and deletes them with an explicit, non-default `--prune-missing` flag. |
+| 10 | **No CORS configuration** — a browser frontend couldn't call this API cross-origin at all. | Medium | Added `django-cors-headers`, no origins allowed by default, opt-in via env var. |
+| 11 | **Misleading error for a genuine "no route exists" case** (e.g. Hawaii↔mainland) — OSRM's public server returns this as an HTTP 400, which was being caught by the generic "service unavailable, try again" handler instead of an accurate "no driving route exists between these locations" message. | Low/Medium | Parse the structured OSRM error body regardless of HTTP status before falling back to a generic message. |
+| 12 | **Nominatim's usage policy requires a real User-Agent**; the shipped default is an obvious placeholder that could get the app rate-limited/blocked with no warning. | Low | Logs a loud, once-per-process warning the first time a Nominatim call is made with the placeholder still active. |
+
+Every row above has a corresponding regression test (see [Testing](#testing))
+and, for the ones that could be demonstrated with a standalone script, a
+before/after repro. Rows 1-4 in particular are the kind of thing a
+"provably optimal" claim and a passing test suite can both quietly hide —
+which is exactly why this pass existed.
 
 ---
 
@@ -348,32 +462,46 @@ database beyond Django's own test DB):
   At meaningfully larger scale (hundreds of thousands of stations), I'd
   reach for PostGIS's spatial index instead of pushing the numpy approach
   further — noted in "What I'd do next".
-- **RoutePlan/FuelStop persist every computed plan.** This wasn't strictly
-  required, but it gives GET-by-id (no recomputation), a request history,
-  and something to render the map view from, essentially for free.
+- **RoutePlan/FuelStop persist every *distinct* computed plan** (deduplicated
+  by resolved inputs + current data version, see the [correctness pass](#correctness-pass-bugs-found-and-fixed-by-an-adversarial-self-review)
+  above) — GET-by-id, a request history, and something to render the map view
+  from, without the table growing purely from cache hits or repeat requests.
 - **FuelStop denormalizes station details at plan-creation time**
   (name/address/price copied in, not just a foreign key) so a historical
   plan keeps showing exactly what was true when it was computed, even after
-  a later `import_fuel_prices` run changes that station's price.
+  a later `import_fuel_prices` run changes that station's price — and, since
+  the cache-invalidation fix above, that's now actually guaranteed rather
+  than being an aspiration the cache could quietly undermine.
+- **Pruning decommissioned stations is opt-in, not automatic.** Detecting
+  "missing from this import" is safe to always report; *deleting* on that
+  basis is only safe with a complete, authoritative source file, so it's a
+  deliberate `--prune-missing` flag rather than default behavior.
+- **No authentication.** See [Security](#security) above — a deliberate,
+  disclosed scope decision, not an oversight.
 
 ---
 
 ## What I'd do next (with more time / at real production scale)
 
+- **Authentication and per-user scoping** — `IsAuthenticated`, a `user` FK
+  on `RoutePlan`, and the list endpoint scoped to the caller's own plans.
+  The single biggest remaining gap; see [Security](#security).
 - Swap the bounding-box + numpy approach for **PostGIS** (`PointField` +
   `GiST` index, `dwithin`/`ClosestPoint` queries) once the station count or
   request volume justified it.
 - Batch/paid **per-address geocoding** for full station-level (not
   city-level) location accuracy.
-- **Redis-backed** caching and rate limiting in front of Nominatim/OSRM
-  specifically (beyond the whole-plan cache already in place), so even the
-  worst case (both endpoints needing the geocoding fallback) degrades
-  gracefully under load.
+- Dedicated **rate limiting in front of Nominatim/OSRM specifically**
+  (distinct from the whole-plan cache and the per-client API throttle
+  already in place), so a burst of never-before-seen locations can't
+  exceed Nominatim's ~1 req/sec usage policy even under load.
 - A background task (Celery/GCP Cloud Tasks) to pre-warm popular
   routes/corridors instead of computing everything synchronously.
 - Swap the public OSRM demo server for a **self-hosted OSRM instance** (or
   a paid provider) for production traffic — the public server is fine for
   this exercise but isn't meant for production load.
+- A scheduled job to periodically run `import_fuel_prices` (and, on a slower
+  cadence, `--prune-missing`) instead of both being manual/on-demand.
 
 ---
 

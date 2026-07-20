@@ -122,14 +122,59 @@ class RoutePlanApiTests(APITestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("error", response.data)
 
-    def test_identical_repeat_request_does_not_call_routing_again(self):
+    def test_identical_repeat_request_reuses_the_same_persisted_plan(self):
+        # Regression test for a real bug: this used to assert
+        # RoutePlan.objects.count() == 2 here and present that as *correct*
+        # behavior -- every cache hit was still writing a brand new
+        # RoutePlan + full set of FuelStops, meaning the table grew without
+        # bound purely from repeat/duplicate requests, cache or no cache.
+        # The fix: a cache hit reuses the already-persisted plan (200), and
+        # only a genuinely new computation creates a new one (201).
         geocode_patch, route_patch = self._patched_pipeline(distance_miles=600.0)
         payload = {"start": "Start City, IL", "finish": "Finish City, IL"}
         with geocode_patch, route_patch as mocked_route:
-            self.client.post("/api/v1/route-plans/", payload, format="json")
-            self.client.post("/api/v1/route-plans/", payload, format="json")
+            first = self.client.post("/api/v1/route-plans/", payload, format="json")
+            second = self.client.post("/api/v1/route-plans/", payload, format="json")
+
         self.assertEqual(mocked_route.call_count, 1)
-        self.assertEqual(RoutePlan.objects.count(), 2)  # still creates a plan record each time
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data["id"], second.data["id"])
+        self.assertEqual(RoutePlan.objects.count(), 1)
+        self.assertEqual(RoutePlan.objects.get().fuel_stops.count(), len(first.data["fuel_stops"]))
+
+    def test_semantically_duplicate_start_and_finish_is_rejected(self):
+        # Regression test for a real bug: differently-worded queries for the
+        # same place ("Chicago, IL" vs "Chicago, Illinois") used to sail
+        # past the naive string-equality check and return a nonsensical
+        # 201 with 0 miles, 0 stops, $0 cost, as if that were a real trip.
+        same_point = Coordinates(latitude=41.8373, longitude=-87.6861)
+        with patch("planner.services.geocoding.geocode_location", side_effect=lambda q: same_point):
+            response = self.client.post(
+                "/api/v1/route-plans/",
+                {"start": "Chicago, IL", "finish": "Chicago, Illinois"},
+                format="json",
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("error", response.data)
+        self.assertEqual(RoutePlan.objects.count(), 0)
+
+    def test_total_cost_and_gallons_exactly_equal_the_sum_of_the_line_items(self):
+        # Regression test for a real bug: total_cost/total_gallons were
+        # rounded independently from each fuel_stop's cost/gallons_purchased
+        # (both derived from the same unrounded float sum, rounded
+        # separately) -- mathematically guaranteed to disagree by a cent
+        # for *some* inputs (round(30.015, 2) == 30.02, but
+        # round(10.005,2)*3 == 30.03). Now the total is computed as the sum
+        # of the already-rounded per-stop values, so they can never diverge.
+        response = self._create_plan(distance_miles=600.0)
+        self.assertEqual(response.status_code, 201, response.data)
+        body = response.data
+
+        stop_cost_sum = round(sum(s["cost"] for s in body["fuel_stops"]), 2)
+        stop_gallons_sum = round(sum(s["gallons_purchased"] for s in body["fuel_stops"]), 3)
+        self.assertEqual(body["total_cost"], stop_cost_sum)
+        self.assertEqual(body["total_gallons"], stop_gallons_sum)
 
     def test_list_and_retrieve_and_map_endpoints(self):
         created = self._create_plan(distance_miles=600.0)
@@ -149,3 +194,30 @@ class RoutePlanApiTests(APITestCase):
     def test_retrieve_missing_plan_returns_404(self):
         response = self.client.get("/api/v1/route-plans/00000000-0000-0000-0000-000000000000/")
         self.assertEqual(response.status_code, 404)
+
+    def test_persist_survives_a_station_deleted_after_being_computed_but_before_being_persisted(self):
+        # Regression test for a real bug: a route plan is computed (and
+        # cached) referencing a Station; if that Station is deleted before
+        # the cached result is later replayed into _persist (e.g. a
+        # reimport, or an admin deleting a bad row, landing inside the
+        # cache TTL window), creating the FuelStop used to raise a raw
+        # IntegrityError (FOREIGN KEY constraint failed) -- on_delete=SET_NULL
+        # on FuelStop.station doesn't help here, because it only fires when
+        # an *already-referencing* row's target is deleted, not when a new
+        # FuelStop is being created against an id that's already gone.
+        from planner.services.route_planner import compute_route_plan
+        from planner.views import RoutePlanViewSet
+
+        geocode_patch, route_patch = self._patched_pipeline(distance_miles=600.0)
+        with geocode_patch, route_patch:
+            result = compute_route_plan("Start City, IL", "Finish City, IL")
+
+        self.assertTrue(result.fuel_plan.stops, "test setup expects at least one stop")
+        deleted_station_id = result.fuel_plan.stops[0].station.pk
+        Station.objects.filter(pk=deleted_station_id).delete()
+
+        route_plan = RoutePlanViewSet._persist("Start City, IL", "Finish City, IL", result)  # must not raise
+
+        first_stop = route_plan.fuel_stops.get(order=1)
+        self.assertIsNone(first_stop.station_id)  # gracefully degraded FK
+        self.assertEqual(first_stop.station_name, "Cheap Stop")  # denormalized snapshot preserved

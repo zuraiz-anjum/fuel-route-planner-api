@@ -40,10 +40,20 @@ SECRET_KEY = os.environ.get(
     "django-insecure-dev-only-key-do-not-use-in-production-1234567890",
 )
 
-DEBUG = env_bool("DJANGO_DEBUG", True)
+# Secure-by-default, not secure-by-remembering-to-set-an-env-var: DEBUG
+# defaults to False, and ALLOWED_HOSTS defaults to localhost-only, so
+# forgetting to configure either for a real deployment fails *closed*
+# (generic 500s / rejected Host headers) rather than *open* (leaked stack
+# traces, settings, and SQL to the public internet; a wildcard Host header
+# accepted from anyone). Local dev opts IN to the friendlier DEBUG=True
+# experience via .env.example -- see that file.
+DEBUG = env_bool("DJANGO_DEBUG", False)
 
+_default_allowed_hosts = "localhost,127.0.0.1,[::1]"
 ALLOWED_HOSTS = [
-    h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",") if h.strip()
+    h.strip()
+    for h in os.environ.get("DJANGO_ALLOWED_HOSTS", _default_allowed_hosts).split(",")
+    if h.strip()
 ]
 
 # --------------------------------------------------------------------------
@@ -57,6 +67,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "corsheaders",
     "rest_framework",
     "stations",
     "planner",
@@ -64,6 +75,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "corsheaders.middleware.CorsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -71,6 +83,21 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
+
+# --------------------------------------------------------------------------
+# CORS
+#
+# Off (no origins allowed) by default -- explicitly opt in per-deployment via
+# CORS_ALLOWED_ORIGINS, e.g. "https://myfrontend.example.com,https://app.example.com".
+# CORS_ALLOW_ALL_ORIGINS is available for quick local/demo use (e.g. testing
+# from a local frontend dev server) but is never enabled by an env var alone
+# reaching some default -- it requires the explicit CORS_ALLOW_ALL_ORIGINS=true.
+# --------------------------------------------------------------------------
+
+CORS_ALLOWED_ORIGINS = [
+    o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+CORS_ALLOW_ALL_ORIGINS = env_bool("CORS_ALLOW_ALL_ORIGINS", False)
 
 ROOT_URLCONF = "config.urls"
 
@@ -207,6 +234,32 @@ GEOCODE_CACHE_TTL_SECONDS = int(os.environ.get("GEOCODE_CACHE_TTL_SECONDS", str(
 ROUTE_CACHE_TTL_SECONDS = int(os.environ.get("ROUTE_CACHE_TTL_SECONDS", str(60 * 60)))
 
 US_CITIES_REFERENCE_CSV = BASE_DIR / "data" / "uscities.csv"
+
+# --------------------------------------------------------------------------
+# Production security hardening
+#
+# Applied whenever DEBUG is off. Kept OFF by default even then for the two
+# settings that can actively break a working deployment if flipped on
+# blindly (SECURE_SSL_REDIRECT, HSTS): docker-compose.yml's `web` service
+# sets DJANGO_DEBUG=False but serves plain HTTP with no TLS termination in
+# front of it, so defaulting SSL redirect to "on" the moment DEBUG is off
+# would turn that demo stack into an infinite-redirect loop. Real
+# deployments behind a TLS-terminating proxy/load balancer (GCP Cloud Run,
+# an nginx/ingress, etc.) should explicitly opt in via the env vars below,
+# and set DJANGO_BEHIND_PROXY so Django trusts the proxy's
+# X-Forwarded-Proto header instead of seeing every request as plain HTTP.
+# --------------------------------------------------------------------------
+
+if not DEBUG:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", False)
+    SECURE_HSTS_SECONDS = int(os.environ.get("DJANGO_SECURE_HSTS_SECONDS", "0"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = SECURE_HSTS_SECONDS > 0
+    SECURE_HSTS_PRELOAD = SECURE_HSTS_SECONDS > 0
+    if env_bool("DJANGO_BEHIND_PROXY", False):
+        SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 LOGGING = {
     "version": 1,

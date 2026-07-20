@@ -47,3 +47,27 @@ class Station(models.Model):
     @property
     def is_geocoded(self) -> bool:
         return self.latitude is not None and self.longitude is not None
+
+
+class DataImportLog(models.Model):
+    """One row per successful `import_fuel_prices` run.
+
+    Its sole purpose is to give downstream code (route_planner.py's whole
+    plan cache) a cheap, DB-backed "data version" signal: the cache key for
+    a computed route plan includes the timestamp of the latest import, so a
+    reimport (prices changing) automatically invalidates every previously
+    cached plan -- old cache entries just become unreachable under a new
+    key, with no need to enumerate or explicitly clear them, and this works
+    identically whether the cache backend is per-process LocMemCache or a
+    shared Redis instance (unlike bumping an in-memory counter, which
+    wouldn't be visible across processes/workers).
+    """
+
+    imported_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    station_count = models.PositiveIntegerField()
+
+    class Meta:
+        ordering = ["-imported_at"]
+
+    def __str__(self) -> str:
+        return f"Import at {self.imported_at:%Y-%m-%d %H:%M:%S} ({self.station_count} stations)"

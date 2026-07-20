@@ -81,16 +81,16 @@ def _check_feasibility(positions: list[float], total_miles: float, tank_capacity
         gap = position - previous
         if gap > tank_capacity_miles + FLOAT_TOLERANCE:
             raise InfeasibleTripError(
-                f"No fuel station is available between mile {previous:.0f} and mile {position:.0f} of the "
-                f"trip -- that {gap:.0f} mile gap exceeds the vehicle's {tank_capacity_miles:.0f} mile range."
+                f"No fuel station is available between mile {previous:.1f} and mile {position:.1f} of the "
+                f"trip -- that {gap:.1f} mile gap exceeds the vehicle's {tank_capacity_miles:.1f} mile range."
             )
         previous = position
 
     final_gap = total_miles - previous
     if final_gap > tank_capacity_miles + FLOAT_TOLERANCE:
         raise InfeasibleTripError(
-            f"No fuel station is available in the final {final_gap:.0f} miles of the trip, which exceeds "
-            f"the vehicle's {tank_capacity_miles:.0f} mile range."
+            f"No fuel station is available in the final {final_gap:.1f} miles of the trip, which exceeds "
+            f"the vehicle's {tank_capacity_miles:.1f} mile range."
         )
 
 
@@ -108,9 +108,21 @@ def plan_fuel_stops(
     if total_miles <= FLOAT_TOLERANCE:
         return FuelPlan()
 
+    # Sort by (position, price) -- NOT position alone. Multiple physically
+    # distinct stations can legitimately tie on distance_along_route_miles
+    # (this got MORE likely once the route polyline was coarsened to ~5mi
+    # sampling for performance -- see geometry.py), and ties were previously
+    # broken by whatever arbitrary DB row order they arrived in (Station's
+    # default ordering is alphabetical by state/city/name, nothing to do
+    # with price). That silently let a more expensive tied station "win" the
+    # empty-tank retroactive billing at index 0, changing the reported total
+    # cost by tens of percent for the exact same trip depending on row
+    # order. Breaking ties by price makes the plan's cost a pure function of
+    # the available stations and the trip, as it always should have been --
+    # see test_fuel_optimizer.py::test_tied_position_stations_do_not_change_cost_based_on_input_order.
     in_range = sorted(
         (rs for rs in route_stations if 0.0 <= rs.distance_along_route_miles <= total_miles),
-        key=lambda rs: rs.distance_along_route_miles,
+        key=lambda rs: (rs.distance_along_route_miles, float(rs.station.price_per_gallon)),
     )
 
     _check_feasibility([rs.distance_along_route_miles for rs in in_range], total_miles, tank_capacity_miles)

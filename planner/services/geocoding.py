@@ -70,7 +70,29 @@ def _try_local_city_lookup(query: str) -> Coordinates | None:
     return None
 
 
+_warned_about_placeholder_user_agent = False
+
+
+def _warn_once_if_user_agent_is_still_the_placeholder() -> None:
+    # Nominatim's usage policy requires an identifying User-Agent and can
+    # (and does) block generic/placeholder ones. Warn loudly -- once per
+    # process, not once per request -- rather than let this fail silently
+    # and mysteriously in production the day someone forgets to set it.
+    global _warned_about_placeholder_user_agent
+    if _warned_about_placeholder_user_agent:
+        return
+    if "set NOMINATIM_USER_AGENT" in settings.NOMINATIM_USER_AGENT:
+        logger.warning(
+            "NOMINATIM_USER_AGENT is still the default placeholder (%r). Nominatim's usage "
+            "policy requires a real identifying contact and may block generic user agents -- "
+            "set NOMINATIM_USER_AGENT before relying on this in production.",
+            settings.NOMINATIM_USER_AGENT,
+        )
+        _warned_about_placeholder_user_agent = True
+
+
 def _geocode_via_nominatim(query: str) -> Coordinates | None:
+    _warn_once_if_user_agent_is_still_the_placeholder()
     try:
         response = requests.get(
             f"{settings.NOMINATIM_BASE_URL}/search",
@@ -116,7 +138,15 @@ def geocode_location(query: str) -> Coordinates:
     key = _cache_key(query)
     cached = cache.get(key)
     if cached is not None:
-        return Coordinates(**cached)
+        try:
+            return Coordinates(latitude=cached["latitude"], longitude=cached["longitude"])
+        except (KeyError, TypeError):
+            # A malformed/unexpected cache payload (e.g. a schema change
+            # deployed while an old entry from the 30-day TTL is still
+            # alive) must never crash the request -- treat it exactly like
+            # a cache miss and recompute, silently self-healing the entry
+            # on the way out (see the cache.set call below).
+            logger.warning("Ignoring malformed geocode cache entry for key=%r", key)
 
     coords = _try_local_city_lookup(query)
     if coords is None:

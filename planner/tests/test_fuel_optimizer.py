@@ -122,3 +122,42 @@ class PlanFuelStopsTests(SimpleTestCase):
         plan = plan_fuel_stops(stations, total_miles=100, mpg=10, tank_capacity_miles=500)
         used_ids = {stop.station.opis_id for stop in plan.stops}
         self.assertEqual(used_ids, {2})
+
+    def test_tied_position_stations_do_not_change_cost_based_on_input_order(self):
+        # Regression test for a real bug: two stations tied on
+        # distance_along_route_miles (entirely plausible given route
+        # sampling resolution) used to have the empty-tank "retroactive"
+        # first-leg billing assigned to whichever one happened to come
+        # first in the input list -- arbitrary, and NOT necessarily the
+        # cheaper one. Reproduced concretely: same trip, same two stations,
+        # only list order flipped, produced $35.00 vs $20.00 -- a 75%
+        # difference for an identical input. The fix sorts by
+        # (position, price), so the cheaper of any tied stations always
+        # wins the tie, regardless of input/DB row order.
+        cheap = _route_station(1, "2.00", 50)
+        expensive = _route_station(2, "5.00", 50)
+
+        plan_expensive_first = plan_fuel_stops(
+            [expensive, cheap], total_miles=100, mpg=10, tank_capacity_miles=500
+        )
+        plan_cheap_first = plan_fuel_stops(
+            [cheap, expensive], total_miles=100, mpg=10, tank_capacity_miles=500
+        )
+
+        self.assertEqual(plan_expensive_first.total_cost, plan_cheap_first.total_cost)
+        # And it should actually be the CHEAP station's price that wins,
+        # not just "whichever answer happens to be consistent."
+        self.assertAlmostEqual(plan_expensive_first.total_cost, 20.0, places=6)  # 10gal @ $2.00
+        for plan in (plan_expensive_first, plan_cheap_first):
+            self.assertEqual(len(plan.stops), 1)
+            self.assertEqual(plan.stops[0].station.opis_id, 1)  # the cheap one
+
+    def test_three_way_tie_always_bills_the_cheapest_of_the_group(self):
+        stations = [
+            _route_station(1, "5.00", 50),
+            _route_station(2, "2.00", 50),
+            _route_station(3, "3.50", 50),
+        ]
+        for ordering in (stations, list(reversed(stations)), [stations[1], stations[2], stations[0]]):
+            plan = plan_fuel_stops(ordering, total_miles=100, mpg=10, tank_capacity_miles=500)
+            self.assertAlmostEqual(plan.total_cost, 20.0, places=6)  # always the $2.00 station

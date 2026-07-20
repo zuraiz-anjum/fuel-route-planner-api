@@ -48,14 +48,35 @@ def get_route(origin: Coordinates, destination: Coordinates) -> RouteResult:
             },
             timeout=settings.OSRM_TIMEOUT_SECONDS,
         )
-        response.raise_for_status()
     except requests.RequestException as exc:
         logger.exception("OSRM routing request failed")
         raise RoutingError("The routing service is unavailable right now. Please try again shortly.") from exc
 
-    payload = response.json()
+    # OSRM's public server responds with a non-2xx status (observed: 400)
+    # even for a well-formed "no route exists between these points" answer
+    # (e.g. Hawaii to the mainland -- no road connects them), not just for
+    # genuine service failures. Try to read the structured error out of the
+    # body first, in either case, so that permanent "no route" answers get
+    # an accurate message instead of being lumped in with transient
+    # "service unavailable, try again" failures.
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+
+    if payload is None or not isinstance(payload, dict):
+        try:
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.exception("OSRM routing request failed")
+            raise RoutingError(
+                "The routing service is unavailable right now. Please try again shortly."
+            ) from exc
+        raise RoutingError("The routing service returned an unexpected response.")
+
     if payload.get("code") != "Ok" or not payload.get("routes"):
-        raise RoutingError("No driving route could be found between the given locations.")
+        detail = payload.get("message") or payload.get("code") or "no route was found"
+        raise RoutingError(f"No driving route exists between these locations ({detail}).")
 
     route = payload["routes"][0]
     coordinates = route["geometry"]["coordinates"]  # GeoJSON order: [lng, lat]

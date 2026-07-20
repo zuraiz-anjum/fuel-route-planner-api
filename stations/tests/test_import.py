@@ -5,7 +5,7 @@ from pathlib import Path
 from django.core.management import call_command
 from django.test import TestCase
 
-from stations.models import Station
+from stations.models import DataImportLog, Station
 
 FUEL_CSV_HEADER = "OPIS Truckstop ID,Truckstop Name,Address,City,State,Rack ID,Retail Price\n"
 CITY_REFERENCE_HEADER = "city,state_id,lat,lng,population\n"
@@ -30,12 +30,13 @@ class ImportFuelPricesTests(TestCase):
             ],
         )
 
-    def _run_import(self, rows: list[str]) -> None:
+    def _run_import(self, rows: list[str], prune_missing: bool = False) -> None:
         _write_csv(self.fuel_csv, FUEL_CSV_HEADER, rows)
         call_command(
             "import_fuel_prices",
             csv_path=str(self.fuel_csv),
             cities_path=str(self.cities_csv),
+            prune_missing=prune_missing,
         )
 
     def test_dedupes_by_opis_id_keeping_cheapest_price(self):
@@ -95,3 +96,28 @@ class ImportFuelPricesTests(TestCase):
         station = Station.objects.get(opis_id=9)
         self.assertEqual(station.name, "PADDED NAME")
         self.assertEqual(station.city, "Springfield")
+
+    def test_each_import_creates_a_data_import_log_row(self):
+        self.assertEqual(DataImportLog.objects.count(), 0)
+        self._run_import(['10,STOP,"I-1",Springfield,IL,100,3.000'])
+        self.assertEqual(DataImportLog.objects.count(), 1)
+        self._run_import(['10,STOP,"I-1",Springfield,IL,100,3.100'])
+        self.assertEqual(DataImportLog.objects.count(), 2, "every run should log a new import, not upsert")
+
+    def test_stations_missing_from_a_reimport_are_reported_but_kept_by_default(self):
+        # Regression coverage for a real data-hygiene gap: a station that's
+        # removed from the source file (closed/decommissioned truck stop)
+        # used to live in the DB forever with no way to detect it, let
+        # alone remove it.
+        self._run_import(['11,WILL DISAPPEAR,"I-1",Springfield,IL,100,3.000'])
+        self._run_import(['12,STILL HERE,"I-1",Springfield,IL,100,3.000'])  # opis_id 11 absent this time
+
+        self.assertTrue(Station.objects.filter(opis_id=11).exists(), "left untouched without --prune-missing")
+        self.assertTrue(Station.objects.filter(opis_id=12).exists())
+
+    def test_prune_missing_deletes_stations_absent_from_the_current_import(self):
+        self._run_import(['13,WILL BE PRUNED,"I-1",Springfield,IL,100,3.000'])
+        self._run_import(['14,SURVIVOR,"I-1",Springfield,IL,100,3.000'], prune_missing=True)
+
+        self.assertFalse(Station.objects.filter(opis_id=13).exists(), "should be pruned: absent + flag set")
+        self.assertTrue(Station.objects.filter(opis_id=14).exists())

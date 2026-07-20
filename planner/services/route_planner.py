@@ -16,7 +16,11 @@ pipeline, not just the routing leg.
 
 The whole result is also cached by its inputs for a configurable TTL
 (ROUTE_CACHE_TTL_SECONDS), so repeated requests for the same trip don't
-call OSRM (or Nominatim) again at all until the cache expires.
+call OSRM (or Nominatim) again at all until the cache expires. The cache
+key also folds in the current station data version (see
+stations/data_version.py), so re-running `import_fuel_prices` -- prices
+changing -- automatically invalidates every previously cached plan instead
+of silently serving stale prices for up to an hour.
 """
 
 import hashlib
@@ -25,7 +29,17 @@ from dataclasses import dataclass
 from django.conf import settings
 from django.core.cache import cache
 
+from planner.exceptions import SameLocationError
 from planner.services import fuel_optimizer, geocoding, geometry, routing, station_finder
+from planner.services.geo_math import haversine_miles
+from stations.data_version import get_current_data_version
+
+# Two geocoded points closer than this are treated as "the same place" even
+# if they were worded differently ("Chicago, IL" vs "Chicago, Illinois").
+# Wide enough to catch same-city duplicates (which resolve to identical or
+# near-identical city centroids), narrow enough to never reject two
+# genuinely distinct, if nearby, towns as an invalid trip.
+SAME_LOCATION_THRESHOLD_MILES = 1.0
 
 
 @dataclass(frozen=True)
@@ -38,14 +52,21 @@ class RoutePlanResult:
     fuel_plan: fuel_optimizer.FuelPlan
     mpg_used: float
     tank_capacity_miles_used: float
+    corridor_miles_used: float
 
 
-def _cache_key(
+def plan_cache_key(
     start_query: str, finish_query: str, mpg: float, tank_capacity_miles: float, corridor_miles: float
 ) -> str:
-    raw = f"{start_query.strip().lower()}|{finish_query.strip().lower()}|{mpg}|{tank_capacity_miles}|{corridor_miles}"
+    """Public so the view layer can independently recompute the identical
+    key (e.g. to check whether a plan for these exact resolved parameters
+    has already been persisted -- see planner/views.py)."""
+    raw = (
+        f"{get_current_data_version()}|{start_query.strip().lower()}|{finish_query.strip().lower()}|"
+        f"{mpg}|{tank_capacity_miles}|{corridor_miles}"
+    )
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return f"route-plan:v1:{digest}"
+    return f"route-plan:v2:{digest}"
 
 
 def compute_route_plan(
@@ -61,13 +82,22 @@ def compute_route_plan(
     )
     corridor_miles = corridor_miles if corridor_miles is not None else settings.ROUTE_SEARCH_CORRIDOR_MILES
 
-    key = _cache_key(start_query, finish_query, mpg, tank_capacity_miles, corridor_miles)
+    key = plan_cache_key(start_query, finish_query, mpg, tank_capacity_miles, corridor_miles)
     cached_result = cache.get(key)
     if cached_result is not None:
         return cached_result
 
     start_coords = geocoding.geocode_location(start_query)
     finish_coords = geocoding.geocode_location(finish_query)
+
+    distance_between_endpoints = haversine_miles(
+        start_coords.latitude, start_coords.longitude, finish_coords.latitude, finish_coords.longitude
+    )
+    if distance_between_endpoints <= SAME_LOCATION_THRESHOLD_MILES:
+        raise SameLocationError(
+            f"Start ({start_query!r}) and finish ({finish_query!r}) both resolve to "
+            f"essentially the same location ({distance_between_endpoints:.2f} mi apart)."
+        )
 
     route = routing.get_route(start_coords, finish_coords)
     route_path = geometry.build_route_path(route.geometry)
@@ -90,6 +120,7 @@ def compute_route_plan(
         fuel_plan=fuel_plan,
         mpg_used=mpg,
         tank_capacity_miles_used=tank_capacity_miles,
+        corridor_miles_used=corridor_miles,
     )
     cache.set(key, result, settings.ROUTE_CACHE_TTL_SECONDS)
     return result

@@ -36,6 +36,17 @@ class InfeasibleTripError(PlannerError):
     default_message = "This trip cannot be completed within the vehicle's range using known stations."
 
 
+class SameLocationError(PlannerError):
+    """Raised when start and finish resolve to (essentially) the same point.
+
+    A plain string comparison ("Chicago, IL" == "Chicago, Illinois"?) misses
+    this the moment the two queries are worded differently but name the same
+    place -- this check runs *after* geocoding, on actual coordinates, so it
+    catches the semantic duplicate, not just the literal one."""
+
+    default_message = "Start and finish resolve to the same location."
+
+
 def api_exception_handler(exc, context):
     if isinstance(exc, PlannerError):
         return Response({"error": exc.message}, status=exc.status_code)
