@@ -16,3 +16,11 @@ class RoutePlanAdmin(admin.ModelAdmin):
     search_fields = ("start_query", "finish_query")
     readonly_fields = [f.name for f in RoutePlan._meta.fields]
     inlines = [FuelStopInline]
+
+    def has_add_permission(self, request):
+        # Every field is read-only (this is a computed/persisted record,
+        # not something anyone should hand-author), which made the "Add"
+        # page a confusing dead end: it rendered with zero editable fields
+        # and no Save button. Removing the "Add" action entirely instead
+        # of leaving a broken-looking link in the admin list view.
+        return False

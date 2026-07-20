@@ -1,6 +1,4 @@
-from django.conf import settings
-from django.core.cache import cache
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404, render
 from rest_framework import mixins, viewsets
 from rest_framework.response import Response
@@ -11,7 +9,7 @@ from planner.serializers import (
     RoutePlanRequestSerializer,
     RoutePlanSerializer,
 )
-from planner.services.route_planner import compute_route_plan, plan_cache_key
+from planner.services.route_planner import compute_plan_key, compute_route_plan
 from stations.models import Station
 
 
@@ -49,41 +47,38 @@ class RoutePlanViewSet(
             corridor_miles=data.get("corridor_miles"),
         )
 
-        # The same (start, finish, mpg, range, corridor, station-data-version)
-        # combination maps to one cache key (see route_planner.plan_cache_key).
-        # A cache *hit* above means this exact plan may already be persisted;
-        # reuse that row instead of writing a fresh, identical RoutePlan (and
-        # a full set of FuelStops) on every repeat request -- without this,
-        # the table grows without bound purely from cache hits, which is
-        # exactly what was happening before (see CHANGELOG/README).
-        dedup_key = self._dedup_cache_key(data["start"], data["finish"], result)
-        existing_plan_id = cache.get(dedup_key)
-        if existing_plan_id:
-            existing_plan = (
-                RoutePlan.objects.prefetch_related("fuel_stops").filter(pk=existing_plan_id).first()
-            )
-            if existing_plan is not None:
-                response_serializer = RoutePlanSerializer(existing_plan, context={"request": request})
-                return Response(response_serializer.data, status=200)
-            # The cached id pointed at a plan that's since been deleted
-            # (e.g. manually, or a future cleanup job) -- fall through and
-            # persist a fresh one below.
-
-        route_plan = self._persist(data["start"], data["finish"], result)
-        cache.set(dedup_key, str(route_plan.id), settings.ROUTE_CACHE_TTL_SECONDS)
+        plan_key = compute_plan_key(
+            data["start"], data["finish"], result.mpg_used, result.tank_capacity_miles_used, result.corridor_miles_used
+        )
+        route_plan, created = self._get_or_persist(plan_key, data["start"], data["finish"], result)
 
         response_serializer = RoutePlanSerializer(route_plan, context={"request": request})
-        return Response(response_serializer.data, status=201)
+        return Response(response_serializer.data, status=201 if created else 200)
 
     @staticmethod
-    def _dedup_cache_key(start_query: str, finish_query: str, result) -> str:
-        base_key = plan_cache_key(
-            start_query, finish_query, result.mpg_used, result.tank_capacity_miles_used, result.corridor_miles_used
-        )
-        return f"{base_key}:route_plan_id"
+    def _get_or_persist(plan_key: str, start_query: str, finish_query: str, result) -> tuple[RoutePlan, bool]:
+        """Returns (route_plan, created). The database's unique constraint
+        on RoutePlan.plan_key -- not this method's ordering -- is what
+        actually guarantees at most one row per logical plan even under
+        concurrent identical requests: two requests can both pass the
+        "does it exist yet" check below at the same time (a plain cache
+        check has exactly this race, reproduced directly: 8 concurrent
+        identical requests produced 2 persisted rows before this fix), but
+        only one of them can win the subsequent INSERT: the DB rejects the
+        second with an IntegrityError, which is caught here and turned into
+        "fetch the winner's row" instead of a 500 or a duplicate.
+        """
+        existing = RoutePlan.objects.prefetch_related("fuel_stops").filter(plan_key=plan_key).first()
+        if existing is not None:
+            return existing, False
+
+        try:
+            return RoutePlanViewSet._persist(plan_key, start_query, finish_query, result), True
+        except IntegrityError:
+            return RoutePlan.objects.prefetch_related("fuel_stops").get(plan_key=plan_key), False
 
     @staticmethod
-    def _persist(start_query: str, finish_query: str, result) -> RoutePlan:
+    def _persist(plan_key: str, start_query: str, finish_query: str, result) -> RoutePlan:
         geometry_points = [
             [round(lat, 5), round(lng, 5)]
             for lat, lng in zip(
@@ -133,6 +128,7 @@ class RoutePlanViewSet(
 
         with transaction.atomic():
             route_plan = RoutePlan.objects.create(
+                plan_key=plan_key,
                 start_query=start_query,
                 finish_query=finish_query,
                 start_latitude=result.start_coordinates.latitude,

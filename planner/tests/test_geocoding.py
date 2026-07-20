@@ -64,6 +64,22 @@ class GeocodeLocationTests(SimpleTestCase):
         mocked_get.assert_called_once()
         self.assertEqual(first, second)
 
+    def test_comma_spacing_variants_share_one_cache_entry(self):
+        # Regression test for a real bug: "123 Some Street, Nowhere, IL" and
+        # "123 Some Street,Nowhere,IL" (no spaces after commas) used to hash
+        # to different cache keys and each cost their own Nominatim call,
+        # despite being the identical query to any human reader.
+        fake_response_json = [{"lat": "3.0", "lon": "4.0"}]
+        with patch("planner.services.geocoding.requests.get") as mocked_get:
+            mocked_get.return_value.raise_for_status.return_value = None
+            mocked_get.return_value.json.return_value = fake_response_json
+
+            geocode_location("123 Some Street, Nowhere, IL")
+            geocode_location("123 Some Street,Nowhere,IL")
+            geocode_location("  123 Some Street,   Nowhere,  IL ")
+
+        mocked_get.assert_called_once()
+
     def test_malformed_cache_entry_is_treated_as_a_miss_not_a_crash(self):
         # Regression test for a real bug: a schema change to the cached
         # payload shape (e.g. a field rename during a future refactor, with

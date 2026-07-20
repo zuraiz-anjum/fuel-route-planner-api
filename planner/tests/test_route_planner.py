@@ -10,6 +10,7 @@ from planner.exceptions import SameLocationError
 from planner.services.geocoding import Coordinates
 from planner.services.route_planner import compute_route_plan
 from planner.services.routing import RouteResult
+from stations.data_version import invalidate_data_version_cache
 from stations.models import DataImportLog
 
 START = Coordinates(latitude=40.0, longitude=-95.0)
@@ -58,7 +59,15 @@ class ComputeRoutePlanCachingTests(TestCase):
             compute_route_plan("Start, IL", "Finish, IL")
             self.assertEqual(mocked_route.call_count, 1)
 
-            DataImportLog.objects.create(station_count=1)  # simulates a reimport completing
+            # Simulates a reimport completing: import_fuel_prices creates
+            # the log row AND proactively clears the cached data-version
+            # (data_version.py caches that lookup for a few seconds so a
+            # plain cache *hit* doesn't cost a DB query on every request --
+            # see its docstring). A test that only does the first half
+            # would still see the stale cached version for a few seconds,
+            # which is exactly why the real command does both.
+            DataImportLog.objects.create(station_count=1)
+            invalidate_data_version_cache()
 
             compute_route_plan("Start, IL", "Finish, IL")
             self.assertEqual(mocked_route.call_count, 2, "a reimport must invalidate the old cache entry")

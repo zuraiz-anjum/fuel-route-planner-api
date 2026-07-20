@@ -12,6 +12,18 @@ class RoutePlan(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
+    # Hash of (normalized start, normalized finish, mpg, range, corridor,
+    # station-data-version) -- see planner.services.route_planner.plan_cache_key.
+    # The UNIQUE constraint is what actually prevents duplicate rows for the
+    # same logical request under concurrency: a cache-based "check, then
+    # create" (what this used to rely on exclusively) is not atomic and does
+    # NOT prevent two concurrent identical requests from both creating a row
+    # -- reproduced directly (8 concurrent identical requests -> 2 rows).
+    # The database's unique index is enforced atomically regardless of
+    # process/thread count; the cache is now just a fast-path optimization
+    # on top of that guarantee, not the guarantee itself.
+    plan_key = models.CharField(max_length=64, unique=True, db_index=True)
+
     start_query = models.CharField(max_length=255)
     finish_query = models.CharField(max_length=255)
 

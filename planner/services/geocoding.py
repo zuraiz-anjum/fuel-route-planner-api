@@ -25,6 +25,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from planner.exceptions import GeocodingError
+from planner.services.query_normalization import normalize_query
 from stations.constants import US_STATE_CODES, US_STATE_NAME_TO_CODE
 from stations.geodata import get_city_reference
 
@@ -40,8 +41,10 @@ class Coordinates:
 def _cache_key(query: str) -> str:
     # Hashed (rather than the raw query) so the key is safe for every cache
     # backend, including memcached-style backends that reject spaces/colons.
-    digest = hashlib.sha256(query.strip().lower().encode("utf-8")).hexdigest()
-    return f"geocode:v1:{digest}"
+    # Normalized first so "Chicago, IL" and "Chicago,IL" share a cache entry
+    # instead of each triggering their own (possibly Nominatim) lookup.
+    digest = hashlib.sha256(normalize_query(query).encode("utf-8")).hexdigest()
+    return f"geocode:v2:{digest}"
 
 
 def _resolve_state_token(token: str) -> str | None:

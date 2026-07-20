@@ -7,8 +7,20 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from stations.constants import US_STATE_CODES
+from stations.data_version import invalidate_data_version_cache
 from stations.geodata import load_city_reference
 from stations.models import DataImportLog, Station
+
+_DELETE_CHUNK_SIZE = 500
+
+
+def _delete_in_chunks(opis_ids: set[int], chunk_size: int = _DELETE_CHUNK_SIZE) -> None:
+    """Delete stations by opis_id in bounded-size batches rather than one
+    query with a huge IN(...) list -- see the call site for why."""
+    id_list = list(opis_ids)
+    for start in range(0, len(id_list), chunk_size):
+        chunk = id_list[start : start + chunk_size]
+        Station.objects.filter(opis_id__in=chunk).delete()
 
 
 class Command(BaseCommand):
@@ -153,27 +165,37 @@ class Command(BaseCommand):
             # in *this* file no longer exists in the source data -- report it
             # always, and only actually delete it when explicitly asked to
             # (see --prune-missing help text for why this isn't the default).
-            stale_qs = Station.objects.exclude(opis_id__in=grouped.keys())
-            stale_count = stale_qs.count()
-            if stale_count:
+            #
+            # Computed as a set difference in Python rather than
+            # .exclude(opis_id__in=grouped.keys()) / one large NOT IN query:
+            # with ~6-7k stations that can approach or exceed some SQLite
+            # builds' compiled SQLITE_MAX_VARIABLE_NUMBER (historically 999
+            # on some system packages, even though this project's bundled
+            # SQLite comfortably allows far more) -- chunking avoids
+            # depending on that limit at all, on any backend.
+            existing_ids = set(Station.objects.values_list("opis_id", flat=True))
+            stale_ids = existing_ids - set(grouped.keys())
+            if stale_ids:
                 if options["prune_missing"]:
-                    stale_qs.delete()
+                    _delete_in_chunks(stale_ids)
                     self.stdout.write(
                         self.style.WARNING(
-                            f"Pruned {stale_count:,} station(s) no longer present in this import "
+                            f"Pruned {len(stale_ids):,} station(s) no longer present in this import "
                             "(--prune-missing was set)."
                         )
                     )
                 else:
                     self.stdout.write(
                         self.style.WARNING(
-                            f"{stale_count:,} previously-imported station(s) are not present in this "
+                            f"{len(stale_ids):,} previously-imported station(s) are not present in this "
                             "file (possibly decommissioned). Left untouched -- re-run with "
                             "--prune-missing to remove them."
                         )
                     )
 
             DataImportLog.objects.create(station_count=len(stations))
+
+        invalidate_data_version_cache()
 
         geocoded = sum(1 for s in stations if s.latitude is not None)
         self.stdout.write(

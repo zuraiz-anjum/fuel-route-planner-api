@@ -14,16 +14,31 @@ call total; the worst case (both endpoints needing the geocoding fallback)
 is three -- matching "one ideal, two or three acceptable" for the whole
 pipeline, not just the routing leg.
 
-The whole result is also cached by its inputs for a configurable TTL
-(ROUTE_CACHE_TTL_SECONDS), so repeated requests for the same trip don't
-call OSRM (or Nominatim) again at all until the cache expires. The cache
-key also folds in the current station data version (see
-stations/data_version.py), so re-running `import_fuel_prices` -- prices
-changing -- automatically invalidates every previously cached plan instead
-of silently serving stale prices for up to an hour.
+The whole result is cached by `compute_plan_key(...)` for a configurable TTL
+(ROUTE_CACHE_TTL_SECONDS), so repeated requests for the same trip don't call
+OSRM (or Nominatim) again -- until the cache expires *or the station data
+changes* (the key folds in the current station-data version, so re-running
+`import_fuel_prices` invalidates every previously cached plan automatically).
+
+--- Concurrency -------------------------------------------------------------
+A plain "check the cache, then compute" is not atomic: two truly concurrent
+identical requests can both miss the cache and both call OSRM -- reproduced
+directly (6 concurrent identical requests -> 6 real OSRM calls, not 1).
+`cache.add()` (atomic add-if-absent on every backend Django ships) is used
+as a short-lived best-effort lock around the compute step: a request that
+loses the race waits briefly for the winner to finish and reuses its
+result. This *reduces* duplicate calls under concurrency; it is not a hard
+guarantee (if the wait times out -- e.g. OSRM itself is unusually slow --
+the waiter computes independently rather than hang indefinitely). The hard
+guarantee that concurrent identical requests never produce more than one
+*persisted* RoutePlan lives in the database (RoutePlan.plan_key's unique
+constraint, enforced in planner/views.py), not here -- that's the part that
+actually can't be allowed to fail.
+------------------------------------------------------------------------------
 """
 
 import hashlib
+import time
 from dataclasses import dataclass
 
 from django.conf import settings
@@ -32,14 +47,21 @@ from django.core.cache import cache
 from planner.exceptions import SameLocationError
 from planner.services import fuel_optimizer, geocoding, geometry, routing, station_finder
 from planner.services.geo_math import haversine_miles
+from planner.services.query_normalization import normalize_query
 from stations.data_version import get_current_data_version
 
 # Two geocoded points closer than this are treated as "the same place" even
 # if they were worded differently ("Chicago, IL" vs "Chicago, Illinois").
 # Wide enough to catch same-city duplicates (which resolve to identical or
 # near-identical city centroids), narrow enough to never reject two
-# genuinely distinct, if nearby, towns as an invalid trip.
+# genuinely distinct, if nearby, towns as an invalid trip -- verified against
+# several real split-by-a-state-line "twin cities" (Texarkana TX/AR, Kansas
+# City KS/MO, Bristol VA/TN), all >4mi apart center-to-center.
 SAME_LOCATION_THRESHOLD_MILES = 1.0
+
+_COMPUTE_LOCK_TTL_SECONDS = 30
+_COMPUTE_LOCK_POLL_INTERVAL_SECONDS = 0.2
+_COMPUTE_LOCK_MAX_WAIT_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -55,18 +77,24 @@ class RoutePlanResult:
     corridor_miles_used: float
 
 
-def plan_cache_key(
+def compute_plan_key(
     start_query: str, finish_query: str, mpg: float, tank_capacity_miles: float, corridor_miles: float
 ) -> str:
-    """Public so the view layer can independently recompute the identical
-    key (e.g. to check whether a plan for these exact resolved parameters
-    has already been persisted -- see planner/views.py)."""
+    """The stable identity hash for a (normalized start, normalized finish,
+    mpg, range, corridor, current station-data-version) combination.
+
+    Used as both the whole-plan computation cache key (here) and
+    RoutePlan.plan_key, the database's unique-constraint dedup mechanism
+    (planner/views.py) -- the same inputs that should share a cached
+    computation are exactly the inputs that should share one persisted row.
+    Public (not `_`-prefixed) so the view layer can compute the identical
+    key for its own uniqueness check.
+    """
     raw = (
-        f"{get_current_data_version()}|{start_query.strip().lower()}|{finish_query.strip().lower()}|"
+        f"{get_current_data_version()}|{normalize_query(start_query)}|{normalize_query(finish_query)}|"
         f"{mpg}|{tank_capacity_miles}|{corridor_miles}"
     )
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    return f"route-plan:v2:{digest}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def compute_route_plan(
@@ -82,45 +110,64 @@ def compute_route_plan(
     )
     corridor_miles = corridor_miles if corridor_miles is not None else settings.ROUTE_SEARCH_CORRIDOR_MILES
 
-    key = plan_cache_key(start_query, finish_query, mpg, tank_capacity_miles, corridor_miles)
-    cached_result = cache.get(key)
+    plan_key = compute_plan_key(start_query, finish_query, mpg, tank_capacity_miles, corridor_miles)
+    result_key = f"route-plan-result:v1:{plan_key}"
+    lock_key = f"route-plan-lock:v1:{plan_key}"
+
+    cached_result = cache.get(result_key)
     if cached_result is not None:
         return cached_result
 
-    start_coords = geocoding.geocode_location(start_query)
-    finish_coords = geocoding.geocode_location(finish_query)
+    got_lock = cache.add(lock_key, "1", _COMPUTE_LOCK_TTL_SECONDS)
+    if not got_lock:
+        waited = 0.0
+        while waited < _COMPUTE_LOCK_MAX_WAIT_SECONDS:
+            time.sleep(_COMPUTE_LOCK_POLL_INTERVAL_SECONDS)
+            waited += _COMPUTE_LOCK_POLL_INTERVAL_SECONDS
+            cached_result = cache.get(result_key)
+            if cached_result is not None:
+                return cached_result
+        # Gave up waiting for the in-flight computation -- proceed
+        # independently rather than hang or fail.
 
-    distance_between_endpoints = haversine_miles(
-        start_coords.latitude, start_coords.longitude, finish_coords.latitude, finish_coords.longitude
-    )
-    if distance_between_endpoints <= SAME_LOCATION_THRESHOLD_MILES:
-        raise SameLocationError(
-            f"Start ({start_query!r}) and finish ({finish_query!r}) both resolve to "
-            f"essentially the same location ({distance_between_endpoints:.2f} mi apart)."
+    try:
+        start_coords = geocoding.geocode_location(start_query)
+        finish_coords = geocoding.geocode_location(finish_query)
+
+        distance_between_endpoints = haversine_miles(
+            start_coords.latitude, start_coords.longitude, finish_coords.latitude, finish_coords.longitude
+        )
+        if distance_between_endpoints <= SAME_LOCATION_THRESHOLD_MILES:
+            raise SameLocationError(
+                f"Start ({start_query!r}) and finish ({finish_query!r}) both resolve to "
+                f"essentially the same location ({distance_between_endpoints:.2f} mi apart)."
+            )
+
+        route = routing.get_route(start_coords, finish_coords)
+        route_path = geometry.build_route_path(route.geometry)
+
+        nearby_stations = station_finder.find_stations_near_route(route_path, corridor_miles=corridor_miles)
+
+        fuel_plan = fuel_optimizer.plan_fuel_stops(
+            nearby_stations,
+            total_miles=route.distance_miles,
+            mpg=mpg,
+            tank_capacity_miles=tank_capacity_miles,
         )
 
-    route = routing.get_route(start_coords, finish_coords)
-    route_path = geometry.build_route_path(route.geometry)
-
-    nearby_stations = station_finder.find_stations_near_route(route_path, corridor_miles=corridor_miles)
-
-    fuel_plan = fuel_optimizer.plan_fuel_stops(
-        nearby_stations,
-        total_miles=route.distance_miles,
-        mpg=mpg,
-        tank_capacity_miles=tank_capacity_miles,
-    )
-
-    result = RoutePlanResult(
-        start_coordinates=start_coords,
-        finish_coordinates=finish_coords,
-        distance_miles=route.distance_miles,
-        duration_seconds=route.duration_seconds,
-        route_path=route_path,
-        fuel_plan=fuel_plan,
-        mpg_used=mpg,
-        tank_capacity_miles_used=tank_capacity_miles,
-        corridor_miles_used=corridor_miles,
-    )
-    cache.set(key, result, settings.ROUTE_CACHE_TTL_SECONDS)
-    return result
+        result = RoutePlanResult(
+            start_coordinates=start_coords,
+            finish_coordinates=finish_coords,
+            distance_miles=route.distance_miles,
+            duration_seconds=route.duration_seconds,
+            route_path=route_path,
+            fuel_plan=fuel_plan,
+            mpg_used=mpg,
+            tank_capacity_miles_used=tank_capacity_miles,
+            corridor_miles_used=corridor_miles,
+        )
+        cache.set(result_key, result, settings.ROUTE_CACHE_TTL_SECONDS)
+        return result
+    finally:
+        if got_lock:
+            cache.delete(lock_key)

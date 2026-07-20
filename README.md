@@ -328,6 +328,24 @@ any heavy geometry math runs, `.only()` to avoid fetching unused columns,
 and vectorized (numpy) distance computation instead of a per-station Python
 loop.
 
+**Two trade-offs worth being explicit about**, both surfaced by the second
+adversarial pass (see above):
+
+- The data-version cache (5s TTL) means a price reimport can, in the
+  absolute worst case, take up to 5 seconds to become visible to a cached
+  trip, instead of instantly. That's a deliberate trade against hitting the
+  DB on every single request (including cache hits) — 5 seconds of possible
+  staleness for a price update is a good trade for removing a DB round-trip
+  from the hot path of every request.
+- The concurrency lock (`cache.add()`-based mutex around computing a plan)
+  is *best-effort*, not a hard guarantee — it saves redundant OSRM calls
+  when several identical requests race, but if the lock holder crashes
+  before releasing it, other requests fall back to polling for up to 10s
+  and then computing independently rather than hanging forever. The
+  *correctness* guarantee (no duplicate rows) never depends on this lock at
+  all — that's the database's `plan_key` uniqueness constraint, which holds
+  regardless of what the cache layer does.
+
 ---
 
 ## Security
@@ -379,7 +397,7 @@ Secure-by-default, not secure-by-remembering-to-set-an-env-var:
 python manage.py test
 ```
 
-64 tests, all offline (external HTTP calls are mocked with `unittest.mock`
+72 tests, all offline (external HTTP calls are mocked with `unittest.mock`
 at the service boundary — no test depends on network access or a live
 database beyond Django's own test DB):
 
@@ -405,10 +423,18 @@ database beyond Django's own test DB):
 - `planner/tests/test_route_planner.py` — whole-plan caching, the
   data-version cache-invalidation-on-reimport regression test, and the
   post-geocode same-location check.
+- `planner/tests/test_query_normalization.py` — comma/whitespace/case
+  canonicalization used for cache-key hashing.
 - `planner/tests/test_api.py` — full request/response cycle through DRF,
   including validation errors, infeasible-trip errors, list/retrieve/map
   endpoints, cache-avoids-a-second-routing-call, plan-dedup-on-cache-hit,
-  rounding-consistency, and dangling-FK-after-deletion regression tests.
+  rounding-consistency, dangling-FK-after-deletion, explicit-null-mpg, and
+  a DB-level unique-constraint regression test — plus
+  `ConcurrentIdenticalRequestsTests`, an `APITransactionTestCase` that
+  fires 8 real threads at the identical trip simultaneously (real commits,
+  not the single wrapping transaction a plain `APITestCase` would use) and
+  asserts exactly one `RoutePlan` row, one upstream routing call, and a
+  correct 200/201 status split come out the other side.
 
 ---
 
@@ -441,6 +467,33 @@ and, for the ones that could be demonstrated with a standalone script, a
 before/after repro. Rows 1-4 in particular are the kind of thing a
 "provably optimal" claim and a passing test suite can both quietly hide —
 which is exactly why this pass existed.
+
+---
+
+## Second adversarial pass: concurrency and more
+
+Ran the same "harshest possible reviewer" exercise a second time against the
+already-fixed codebase, specifically hunting for anything the first pass
+missed — including inside the round-1 fixes themselves. Found 6 more real
+issues, the first of which is the most serious bug in this project at any
+point during its development:
+
+| # | Issue | Severity | Fix |
+|---|---|---|---|
+| 1 | **Race condition: concurrent identical requests created duplicate `RoutePlan` rows and each triggered its own OSRM call.** The round-1 fix (#5 above) made a cache *hit* reuse the persisted plan, but said nothing about two requests racing on the same cache *miss* — both would compute, and both would `INSERT`. Reproduced with real Python threads (mocked pipeline) and again against a live `runserver` with real HTTP requests: N simultaneous identical POSTs produced N rows and N upstream calls. | **Critical** | Added a DB-enforced `plan_key` (`unique=True`) derived from the resolved request + vehicle params + data version. Persistence now does insert-then-catch-`IntegrityError`-then-fetch-the-winner — the *database's* uniqueness guarantee is what actually prevents duplicates, not an application-level check (which can never be atomic under real concurrency). Layered a best-effort `cache.add()` mutex on top purely to save redundant OSRM calls while a computation is in flight (a few seconds), with a bounded poll-and-give-up fallback so a crashed lock-holder can never wedge other requests forever. Verified with both a deterministic mocked-threading test and a live 8-thread test against a running server: exactly 1 row, 1 upstream call, correct 200/201 split either way. |
+| 2 | **The data-version cache-invalidation fix (round-1 #2) added a DB query to every single request**, including cache hits — the whole point of caching a plan was to avoid exactly this kind of per-request DB round-trip. | Medium | The data-version lookup itself is now cached for 5 seconds, with the import command proactively invalidating it the moment a reimport finishes — so a hot path stays a pure cache hit, and a price update is still visible within, worst case, 5 seconds instead of silently up to an hour. |
+| 3 | **Cache keys were sensitive to cosmetic input differences.** `"Chicago, IL"` and `"Chicago,IL"` (no space) or `"Chicago,  IL"` (extra space) are the same query to any human, but hashed to different geocode/route-plan cache entries — needless duplicate Nominatim calls and duplicate persisted plans for what a user would consider identical requests. | Medium | Added `normalize_query()` (whitespace-collapse + comma-spacing + case fold) and route every cache-key computation through it before hashing. |
+| 4 | **Explicit JSON `null` for `mpg`/`vehicle_range_miles`/`corridor_miles` was rejected with a 400**, even though omitting the key entirely was accepted and used the same default. Any typed client/generated SDK that always sends every field (using `null` for "unset") hit a confusing, inconsistent error for the identical intent. | Medium | Added `allow_null=True` alongside the existing `required=False, default=None` on all three fields. |
+| 5 | **`--prune-missing`'s "what's no longer present" query used a single `exclude(opis_id__in=...)` over the entire new import's id set** — fine at ~6.6k rows, but a portability trap: SQLite caps the number of bound variables in a single statement (`SQLITE_MAX_VARIABLE_NUMBER`, default 999), so this silently breaks on a large enough source file even though nothing about the *logic* is wrong. | Low/Medium | Compute the stale-id set in Python (`existing - imported`, one flat `values_list` query) and delete in bounded chunks of 500 — works identically on SQLite and Postgres regardless of import file size. |
+| 6 | **`DataImportLog` had no admin visibility, and `RoutePlan`'s admin offered a broken "Add" page** (every field is read-only, so it rendered with no editable fields and no Save button) — small, but exactly the kind of rough edge a harsh reviewer is told to look for. | Low | Registered `DataImportLogAdmin` (read-only); disabled `RoutePlanAdmin`'s add permission entirely instead of leaving a dead-end link. |
+
+Issue #1 is the one worth dwelling on: a passing test suite and a
+"cache-hit reuses the persisted plan" fix from the *first* review round both
+made this look solved, right up until it was hit with actual concurrent
+requests. It's a reminder that "check, then act" is never sufficient under
+real concurrency — only a database constraint (or genuine transactional
+isolation) is, and it's exactly the class of bug that's invisible until
+something running at the same time actually finds the gap.
 
 ---
 

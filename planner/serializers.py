@@ -12,16 +12,22 @@ class RoutePlanRequestSerializer(serializers.Serializer):
     finish = serializers.CharField(
         max_length=255, trim_whitespace=True, help_text="Trip destination, e.g. 'Denver, CO'."
     )
+    # allow_null=True alongside default=None: a client that always sends
+    # every key (common with typed form libraries / generated clients) and
+    # uses JSON null for "unset" should get the same "use the default"
+    # behavior as a client that omits the key entirely -- previously,
+    # omitting the field worked but explicitly sending `"mpg": null` was
+    # rejected with "This field may not be null", for identical intent.
     mpg = serializers.FloatField(
-        required=False, min_value=1, max_value=200, default=None,
+        required=False, allow_null=True, min_value=1, max_value=200, default=None,
         help_text=f"Vehicle fuel economy in miles/gallon. Defaults to {settings.VEHICLE_MPG}.",
     )
     vehicle_range_miles = serializers.FloatField(
-        required=False, min_value=1, max_value=5000, default=None,
+        required=False, allow_null=True, min_value=1, max_value=5000, default=None,
         help_text=f"Max miles the vehicle can drive on a full tank. Defaults to {settings.VEHICLE_RANGE_MILES}.",
     )
     corridor_miles = serializers.FloatField(
-        required=False, min_value=0.5, max_value=50, default=None,
+        required=False, allow_null=True, min_value=0.5, max_value=50, default=None,
         help_text=(
             "How far off the route (in miles) a station may be and still be considered. "
             f"Defaults to {settings.ROUTE_SEARCH_CORRIDOR_MILES}."
