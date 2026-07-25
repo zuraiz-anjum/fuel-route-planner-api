@@ -33,7 +33,7 @@ class Command(BaseCommand):
         city_state_pairs = sorted({(s.city, s.state) for s in unresolved})
 
         if not city_state_pairs:
-            self.stdout.write(self.style.SUCCESS("No unresolved stations -- nothing to do."))
+            self.stdout.write(self.style.SUCCESS("No unresolved stations, nothing to do."))
             return
 
         self.stdout.write(f"Geocoding {len(city_state_pairs)} unresolved city/state pairs via Nominatim ...")

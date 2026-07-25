@@ -34,7 +34,7 @@ services:
       DJANGO_DEBUG: "False"
       DJANGO_SECRET_KEY: docker-compose-dev-secret-key
       # Requests arrive as http://localhost:8000 (this compose file publishes
-      # no TLS termination), so the Host header is "localhost"/"127.0.0.1" --
+      # no TLS termination), so the Host header is "localhost"/"127.0.0.1",
       # no reason to fall back to a wildcard here. Override for a real domain
       # when actually deploying instead of running this stack locally.
       DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1"

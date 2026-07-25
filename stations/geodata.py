@@ -23,7 +23,7 @@ def load_city_reference(path: Path) -> CityReference:
 
 @lru_cache(maxsize=1)
 def get_city_reference() -> CityReference:
-    """Process-wide cached copy -- the CSV (~37k rows) is parsed once per
+    """Process-wide cached copy, the CSV (~37k rows) is parsed once per
     worker process, not once per request."""
     from django.conf import settings
 

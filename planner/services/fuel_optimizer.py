@@ -1,49 +1,40 @@
 """Minimum-cost fuel purchasing plan for a route.
 
-Given the trip's total distance, a vehicle's tank capacity (expressed as
-miles of range) and fuel economy, and a list of candidate stations (each
-with a price and a position along the route), decide which stations to stop
-at and how many gallons to buy at each, minimizing total spend while never
+Given the trip's total distance, a vehicle's tank capacity (in miles of
+range) and fuel economy, and a list of candidate stations (each with a
+price and a position along the route), decide which stations to stop at
+and how many gallons to buy at each, minimizing total spend while never
 letting the tank run empty or exceed capacity.
 
---- Assumption -------------------------------------------------------------
-The vehicle departs the origin with an EMPTY tank. This means:
-  * the very first stop must be reachable within one tank of range from the
-    start, and
-  * the fuel burned reaching that first stop is billed at *that* stop's
-    price (there's no earlier station to have bought it from), so the
-    reported total cost always reflects the entire trip.
-  * (A "starts full" assumption was considered and rejected: it would report
-    $0 for any trip shorter than the vehicle's range, which isn't a useful
-    answer to "how much will fuel cost for this trip".)
-This is a documented, deliberate modeling choice -- see README.md.
+Assumption: the vehicle leaves with an empty tank. So the first stop has
+to be reachable within one tank of range from the start, and whatever fuel
+gets burned getting there is billed at that first stop's price (there's no
+earlier station to have bought it from). I considered a "starts full"
+assumption instead, but that reports $0 for any trip shorter than the
+vehicle's range, which isn't a useful answer to "how much will fuel cost
+for this trip." See README.md for more on this.
 
---- Algorithm ---------------------------------------------------------------
-This is the classical, provably-optimal greedy solution to "minimum cost to
-travel with a fuel-capacity constraint" (an exchange-argument optimal
-strategy, sometimes seen as an interview problem under names like "gas
-station refueling cost"), extended with one bookkeeping detail for the
-empty-tank assumption above:
+Algorithm: this is the standard greedy solution to the "gas station
+refueling cost" problem (provably optimal via an exchange argument), plus
+one extra bit of bookkeeping for the empty-tank assumption above.
 
-  Process candidate stations in route order. At each one, look ahead (within
-  one tank of range) for the next station with a STRICTLY lower price.
-    - If one exists, buy only enough fuel to just reach it -- there's no
-      reason to buy more now at a worse price than what's coming.
-    - If none exists (nothing cheaper is reachable on a full tank), fill the
-      tank completely -- this is the best price available for as far as the
-      vehicle can currently see, so maximize how much of it gets carried
-      forward.
-  At the very first station only, the distance already driven to reach it
-  (with no prior purchase) is *also* billed at that station's price, in
-  addition to (not constrained by the capacity of) whatever is bought to
-  carry forward -- it reflects fuel already consumed, not fuel that needs to
-  fit in the tank going forward, so it never causes an over-capacity fill.
+Walk the candidate stations in route order. At each one, look ahead (within
+one tank of range) for the next station that's strictly cheaper:
+  - if there is one, buy just enough to reach it: no point paying more now
+    for fuel you could get cheaper up the road
+  - if there isn't (nothing cheaper within a full tank), fill up: this is
+    the best price you can see right now, so carry as much of it forward as
+    possible
 
-  Repeat until the destination is reached. The trip is infeasible if any gap
-  between consecutive usable stations (including start->first-stop and
-  last-stop->destination) exceeds the tank's range -- no purchase strategy
-  can fix a genuine coverage gap.
-------------------------------------------------------------------------------
+At the very first station, on top of whatever's bought to carry forward,
+also bill the distance already driven to get there (nothing to buy it from
+before that). That part isn't subject to the tank-capacity cap since it's
+fuel already burned, not fuel that has to fit in the tank going forward.
+
+Keep going until the destination is reached. The trip is infeasible if any
+gap between consecutive usable stations, including start-to-first-stop
+and last-stop-to-destination, is wider than the tank's range, since no
+purchase strategy can bridge a genuine coverage gap.
 """
 
 from dataclasses import dataclass, field
@@ -82,7 +73,7 @@ def _check_feasibility(positions: list[float], total_miles: float, tank_capacity
         if gap > tank_capacity_miles + FLOAT_TOLERANCE:
             raise InfeasibleTripError(
                 f"No fuel station is available between mile {previous:.1f} and mile {position:.1f} of the "
-                f"trip -- that {gap:.1f} mile gap exceeds the vehicle's {tank_capacity_miles:.1f} mile range."
+                f"trip; that {gap:.1f} mile gap exceeds the vehicle's {tank_capacity_miles:.1f} mile range."
             )
         previous = position
 
@@ -108,17 +99,17 @@ def plan_fuel_stops(
     if total_miles <= FLOAT_TOLERANCE:
         return FuelPlan()
 
-    # Sort by (position, price) -- NOT position alone. Multiple physically
+    # Sort by (position, price), NOT position alone. Multiple physically
     # distinct stations can legitimately tie on distance_along_route_miles
     # (this got MORE likely once the route polyline was coarsened to ~5mi
-    # sampling for performance -- see geometry.py), and ties were previously
+    # sampling for performance, see geometry.py), and ties were previously
     # broken by whatever arbitrary DB row order they arrived in (Station's
     # default ordering is alphabetical by state/city/name, nothing to do
     # with price). That silently let a more expensive tied station "win" the
     # empty-tank retroactive billing at index 0, changing the reported total
     # cost by tens of percent for the exact same trip depending on row
     # order. Breaking ties by price makes the plan's cost a pure function of
-    # the available stations and the trip, as it always should have been --
+    # the available stations and the trip, as it always should have been:
     # see test_fuel_optimizer.py::test_tied_position_stations_do_not_change_cost_based_on_input_order.
     in_range = sorted(
         (rs for rs in route_stations if 0.0 <= rs.distance_along_route_miles <= total_miles),
@@ -129,7 +120,7 @@ def plan_fuel_stops(
 
     if not in_range:
         # Physically possible (short trip, within one tank) but we have no
-        # pricing data anywhere near the route -- be honest about that
+        # pricing data anywhere near the route, be honest about that
         # rather than silently reporting $0.
         return FuelPlan(
             total_gallons=total_miles / mpg,

@@ -16,7 +16,7 @@ _DELETE_CHUNK_SIZE = 500
 
 def _delete_in_chunks(opis_ids: set[int], chunk_size: int = _DELETE_CHUNK_SIZE) -> None:
     """Delete stations by opis_id in bounded-size batches rather than one
-    query with a huge IN(...) list -- see the call site for why."""
+    query with a huge IN(...) list, see the call site for why."""
     id_list = list(opis_ids)
     for start in range(0, len(id_list), chunk_size):
         chunk = id_list[start : start + chunk_size]
@@ -28,7 +28,7 @@ class Command(BaseCommand):
         "Import/refresh Station records from the OPIS fuel price CSV. Rows are "
         "deduplicated by truckstop id (keeping the lowest observed price), "
         "restricted to US states/DC, and geocoded at the city level using the "
-        "bundled US cities reference dataset -- no external API calls needed. "
+        "bundled US cities reference dataset, no external API calls needed. "
         "Safe to re-run; existing stations are upserted by opis_id."
     )
 
@@ -48,9 +48,9 @@ class Command(BaseCommand):
             action="store_true",
             help=(
                 "Delete existing stations whose opis_id is NOT present in this import "
-                "(i.e. genuinely removed from the source file -- closed/decommissioned "
+                "(i.e. genuinely removed from the source file, closed/decommissioned "
                 "truck stops). Off by default: only use this with a complete, "
-                "authoritative source file -- running it against a partial/test CSV "
+                "authoritative source file, running it against a partial/test CSV "
                 "will delete most of your station table. Without this flag, stations "
                 "missing from the current file are left untouched but reported."
             ),
@@ -116,6 +116,22 @@ class Command(BaseCommand):
             f"(skipped {skipped_non_us:,} non-US rows, {skipped_bad_row:,} malformed rows)."
         )
 
+        # Stations already geocoded via the one-off Nominatim pass
+        # (geocode_remaining_stations) won't be in city_reference either,
+        # that's exactly why they needed that pass. Without this, re-running
+        # this command (e.g. a routine price refresh) would blow away that
+        # work: bulk_create's update_conflicts overwrites latitude/longitude/
+        # geocode_source unconditionally, and the fresh lookup below would
+        # come back empty for those same rows every time, resetting them to
+        # ungeocoded. So: only treat a station as "still unresolved" if we
+        # don't already have coordinates for it from a previous run.
+        previously_geocoded = {
+            opis_id: (lat, lng, source)
+            for opis_id, lat, lng, source in Station.objects.exclude(latitude__isnull=True).values_list(
+                "opis_id", "latitude", "longitude", "geocode_source"
+            )
+        }
+
         stations: list[Station] = []
         unmatched_cities: set[tuple[str, str]] = set()
         for data in grouped.values():
@@ -123,6 +139,8 @@ class Command(BaseCommand):
             coords = city_reference.get(key)
             if coords:
                 lat, lng, source = coords[0], coords[1], "city_reference"
+            elif data["opis_id"] in previously_geocoded:
+                lat, lng, source = previously_geocoded[data["opis_id"]]
             else:
                 lat, lng, source = None, None, ""
                 unmatched_cities.add(key)
@@ -162,7 +180,7 @@ class Command(BaseCommand):
             )
 
             # Anything already in the DB whose opis_id doesn't appear anywhere
-            # in *this* file no longer exists in the source data -- report it
+            # in *this* file no longer exists in the source data, report it
             # always, and only actually delete it when explicitly asked to
             # (see --prune-missing help text for why this isn't the default).
             #
@@ -171,7 +189,7 @@ class Command(BaseCommand):
             # with ~6-7k stations that can approach or exceed some SQLite
             # builds' compiled SQLITE_MAX_VARIABLE_NUMBER (historically 999
             # on some system packages, even though this project's bundled
-            # SQLite comfortably allows far more) -- chunking avoids
+            # SQLite comfortably allows far more), chunking avoids
             # depending on that limit at all, on any backend.
             existing_ids = set(Station.objects.values_list("opis_id", flat=True))
             stale_ids = existing_ids - set(grouped.keys())
@@ -188,7 +206,7 @@ class Command(BaseCommand):
                     self.stdout.write(
                         self.style.WARNING(
                             f"{len(stale_ids):,} previously-imported station(s) are not present in this "
-                            "file (possibly decommissioned). Left untouched -- re-run with "
+                            "file (possibly decommissioned). Left untouched, re-run with "
                             "--prune-missing to remove them."
                         )
                     )

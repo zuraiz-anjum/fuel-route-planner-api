@@ -16,7 +16,7 @@ class GeocodeLocationTests(SimpleTestCase):
             coords = geocode_location("Chicago, IL")
         mocked_get.assert_not_called()
         # Exact value from the bundled reference dataset (data/uscities.csv),
-        # not the textbook city-hall coordinate -- this is a real city-level
+        # not the textbook city-hall coordinate, this is a real city-level
         # centroid, which is all the corridor-matching downstream needs.
         self.assertAlmostEqual(coords.latitude, 41.8373, places=3)
         self.assertAlmostEqual(coords.longitude, -87.6861, places=3)
@@ -65,8 +65,8 @@ class GeocodeLocationTests(SimpleTestCase):
         self.assertEqual(first, second)
 
     def test_comma_spacing_variants_share_one_cache_entry(self):
-        # Regression test for a real bug: "123 Some Street, Nowhere, IL" and
-        # "123 Some Street,Nowhere,IL" (no spaces after commas) used to hash
+        # "123 Some Street, Nowhere, IL" and "123 Some Street,Nowhere,IL"
+        # (no spaces after commas) used to hash
         # to different cache keys and each cost their own Nominatim call,
         # despite being the identical query to any human reader.
         fake_response_json = [{"lat": "3.0", "lon": "4.0"}]
@@ -81,12 +81,12 @@ class GeocodeLocationTests(SimpleTestCase):
         mocked_get.assert_called_once()
 
     def test_malformed_cache_entry_is_treated_as_a_miss_not_a_crash(self):
-        # Regression test for a real bug: a schema change to the cached
-        # payload shape (e.g. a field rename during a future refactor, with
+        # Guards against a schema change to the cached payload shape (e.g.
+        # a field rename during a future refactor, with
         # an old entry still alive under the 30-day geocode cache TTL, or
         # simply a rolling deploy where two code versions briefly share one
         # Redis instance) used to raise a raw, unhandled TypeError instead
-        # of gracefully recomputing -- a 500 for something that should be
+        # of gracefully recomputing, a 500 for something that should be
         # invisible to the caller.
         query = "Chicago, IL"
         cache.set(_cache_key(query), {"unexpected_field": "x", "another": "y"}, 3600)
@@ -100,7 +100,7 @@ class GeocodeLocationTests(SimpleTestCase):
         self.assertAlmostEqual(coords.latitude, 41.8373, places=3)
 
     def test_self_heals_a_malformed_cache_entry_for_subsequent_calls(self):
-        query = "123 Some Street, Nowhere, IL"  # not resolvable locally -- forces the Nominatim path
+        query = "123 Some Street, Nowhere, IL"  # not resolvable locally, forces the Nominatim path
         cache.set(_cache_key(query), {"lat": 1.0, "lng": 2.0}, 3600)  # wrong field names
 
         fake_response_json = [{"lat": "9.0", "lon": "8.0"}]

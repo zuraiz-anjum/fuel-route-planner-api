@@ -1,5 +1,5 @@
 """Turns a raw OSRM route polyline into a downsampled path annotated with
-cumulative distance from the origin -- the representation the corridor
+cumulative distance from the origin, the representation the corridor
 search and fuel optimizer actually need (position along the route matters
 far more than every individual GPS vertex).
 """
@@ -12,7 +12,7 @@ from planner.services.geo_math import haversine_miles
 
 # A coast-to-coast OSRM route can return several thousand raw vertices.
 # The station search corridor is a handful of miles wide, and station
-# coordinates are themselves city-level centroids (see stations/geodata.py) --
+# coordinates are themselves city-level centroids (see stations/geodata.py),
 # already a coarser source of error than a few miles of polyline sampling.
 # ~5 mile spacing is plenty of resolution for that corridor check and keeps
 # the O(stations x route_points) distance matrix in station_finder.py fast

@@ -1,14 +1,14 @@
 """Cheap "how fresh is the station data" signal, used by
 planner/services/route_planner.py to fold into its cache key so re-running
 `import_fuel_prices` automatically invalidates every previously cached route
-plan -- see DataImportLog's docstring.
+plan, see DataImportLog's docstring.
 
 The version itself is cached for a short TTL rather than queried on every
 single request: an earlier version of this queried DataImportLog directly
 on every call, which meant even a pure cache *hit* for a route plan cost a
 real DB round-trip just to compute which cache key to look up. Since the
-version only ever changes when an import completes -- not something that
-happens more than a handful of times a day -- a few seconds of staleness on
+version only ever changes when an import completes, not something that
+happens more than a handful of times a day, a few seconds of staleness on
 that specific value is a fine trade for not hitting the DB on every request.
 `import_fuel_prices` also proactively clears this cache entry the moment an
 import completes, so with a shared cache backend (Redis) the invalidation

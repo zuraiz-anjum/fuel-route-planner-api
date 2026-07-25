@@ -6,7 +6,7 @@ class Station(models.Model):
     sheet by truckstop id, with the cheapest observed retail price and a
     geocoded (city-level) position.
 
-    Only US stations are imported -- see stations.constants.US_STATE_CODES --
+    Only US stations are imported, see stations.constants.US_STATE_CODES,
     since the planner only routes within the USA.
     """
 
@@ -56,7 +56,7 @@ class DataImportLog(models.Model):
     plan cache) a cheap, DB-backed "data version" signal: the cache key for
     a computed route plan includes the timestamp of the latest import, so a
     reimport (prices changing) automatically invalidates every previously
-    cached plan -- old cache entries just become unreachable under a new
+    cached plan, old cache entries just become unreachable under a new
     key, with no need to enumerate or explicitly clear them, and this works
     identically whether the cache backend is per-process LocMemCache or a
     shared Redis instance (unlike bumping an in-memory counter, which
