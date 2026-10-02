@@ -1,23 +1,50 @@
 # Fuel Route Planner API
 
-A Django REST API that, given a start and finish location in the USA, returns:
+**Give it two US cities and it tells you exactly where to buy fuel to spend the least on the drive.**
 
-- the driving route (distance, duration, and a full polyline for mapping),
-- the **cost-optimal** sequence of fuel stops along that route (a vehicle
-  with a 500-mile range needs to refuel more than once on a long trip), and
-- the **total fuel cost** for the whole trip, assuming 10 mpg.
+![Tests](https://img.shields.io/badge/tests-81%20passing-brightgreen)
+![Django](https://img.shields.io/badge/Django-5.2%20LTS-092E20?logo=django)
+![DRF](https://img.shields.io/badge/Django%20REST-Framework-A30000)
+![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)
 
-Built with Django 5.2 (current LTS) + Django REST Framework, a free/keyless
-routing API (OSRM), a free/keyless geocoding strategy, and a from-scratch
-greedy optimization algorithm for the fuel-purchasing decision.
+![Route plan map](docs/screenshot.png)
 
-```
-POST /api/v1/route-plans/
-{ "start": "Chicago, IL", "finish": "Los Angeles, CA" }
-```
-returns distance, a map polyline, ~18 recommended fuel stops with exact
-gallons/cost per stop, and the trip's total fuel cost, computed with a
-**single** external routing API call.
+![Demo](docs/demo.gif)
+<!-- Record docs/demo.gif: POST a Chicago to Los Angeles plan, then open its /map/ view. -->
+
+## What it does
+
+You send a start and a finish anywhere in the USA. The API returns the driving route,
+a map polyline, and the cheapest sequence of fuel stops for a vehicle with a 500-mile
+range at 10 mpg, with gallons and cost at each stop and the total for the trip. Prices
+come from a dataset of 6,626 real US truck stops. The whole plan costs a single external
+routing call, and the fuel decision is a greedy algorithm written from scratch and
+checked against hand-worked scenarios. Every plan is saved, can be fetched again without
+recomputing, and has its own Leaflet map page.
+
+## By the numbers
+
+| | |
+|---|---|
+| Automated tests | 81 passing, 0 failing (`python manage.py test`) |
+| Endpoints | 5 (create plan, list plans, get plan, plan map, health check) |
+| Station data | 6,626 unique US stations imported, 6,223 geocoded from the bundled data |
+| External calls per plan | 1 routing call (OSRM), plus geocoding only when a city is not in the local table |
+| Fresh plan latency | median 1.75 s, p90 1.98 s (9 different city pairs, run locally, includes the live OSRM call) |
+| Repeat plan latency | under 0.25 s (cached result, 9 requests, run locally) |
+| Code size | about 2,960 lines of Python (non-blank, excluding migrations) |
+
+Example: Chicago, IL to Los Angeles, CA comes back as 2,029 miles, 18 fuel stops and
+$615.92 in fuel.
+
+## Architecture at a glance
+
+A thin Django REST layer sits on top of a services package that knows nothing about
+HTTP: geocoding, routing, geometry, a station finder that pulls candidates near the
+route with a bounding box and vectorized distance math, and the fuel optimizer. Results
+are cached whole, so a repeat request skips the routing call entirely. SQLite works out
+of the box; Docker Compose brings up Postgres and Redis. The full breakdown is in
+[Architecture](#architecture) and [The optimization algorithm](#the-optimization-algorithm).
 
 ---
 
